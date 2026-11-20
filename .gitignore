@@ -1,0 +1,5 @@
+/target
+*.mcr
+*.osm.pbf
+.DS_Store
+!/vendor/
