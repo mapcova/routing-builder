@@ -1,0 +1,23 @@
+[package]
+name = "mcr"
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0-only"
+description = "Offline builder of MapCova routing graphs (.mcr) from OpenStreetMap extracts"
+publish = false
+
+[lib]
+name = "mcr"
+path = "src/lib.rs"
+
+[[bin]]
+name = "mcr"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+fast_paths = { path = "vendor/fast_paths" }
+osmpbf = "0.3.8"
+
+[profile.release]
+debug = false
