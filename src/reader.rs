@@ -45,9 +45,16 @@ impl Mcr {
         if v != VERSION {
             return Err(format!("unsupported format version {v}"));
         }
-        let sections = (0..SECTION_NAMES.len())
+        let sections: Vec<(u64, u64)> = (0..SECTION_NAMES.len())
             .map(|i| (u64at(&data, 128 + i * 16), u64at(&data, 136 + i * 16)))
             .collect();
+        // A truncated or forged section table must be an error, never a panic.
+        for (i, &(o, l)) in sections.iter().enumerate() {
+            match o.checked_add(l) {
+                Some(end) if end <= data.len() as u64 => {}
+                _ => return Err(format!("section {} lies outside the file", SECTION_NAMES[i])),
+            }
+        }
         Ok(Self {
             profile: u32at(&data, 8),
             edge_based: u32at(&data, 12) == 1,

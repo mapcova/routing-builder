@@ -479,3 +479,14 @@ fn a_barrier_junction_is_a_dead_end_for_walkers_and_riders() {
         assert_eq!(m.query(b.new_id[a as usize], b.new_id[z as usize]), None, "{profile:?}");
     }
 }
+
+#[test]
+fn a_section_outside_the_file_is_an_error_not_a_panic() {
+    let mut data = vec![0u8; 4096];
+    data[0..4].copy_from_slice(mcr::file::MAGIC);
+    data[4..8].copy_from_slice(&mcr::file::VERSION.to_le_bytes());
+    // first section: offset 4000, length 1000 -> ends past the 4096-byte file
+    data[128..136].copy_from_slice(&4000u64.to_le_bytes());
+    data[136..144].copy_from_slice(&1000u64.to_le_bytes());
+    assert!(mcr::reader::Mcr::from_bytes(data).is_err());
+}
