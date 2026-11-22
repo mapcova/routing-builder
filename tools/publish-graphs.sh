@@ -31,6 +31,10 @@ INPUT=$2
 [[ $ZONE =~ ^[a-z0-9][a-z0-9-]*$ ]] || die "the zone must be lower case letters, digits and dashes (a zone of config/offers.json)"
 [[ -f $INPUT ]] || die "no such extract: $INPUT"
 
+# Taken out of the environment at once: only the php data:pack-graph call gets it (below), not mcr, not the other tools.
+PUBLISHER_TOKEN=${MAPCOVA_PUBLISHER_TOKEN:-}
+unset MAPCOVA_PUBLISHER_TOKEN
+
 MCR=${MCR:-target/release/mcr}
 UPDATES_DIR=${UPDATES_DIR:-../mapcova-updates}
 UPDATES_URL=${UPDATES_URL:-https://updates.mapcova.com}
@@ -39,8 +43,7 @@ DRY_RUN=${DRY_RUN:-0}
 [[ -x $MCR ]] || die "build the tool first: cargo build --release (looked for $MCR)"
 [[ -f $UPDATES_DIR/bin/updates ]] || die "no mapcova-updates checkout at $UPDATES_DIR (set UPDATES_DIR)"
 if [[ $DRY_RUN != 1 ]]; then
-  [[ ${MAPCOVA_PUBLISHER_TOKEN:-} == mdp_* ]] || die "set MAPCOVA_PUBLISHER_TOKEN to an mdp_ publisher token (or DRY_RUN=1)"
-  export MAPCOVA_PUBLISHER_TOKEN
+  [[ $PUBLISHER_TOKEN == mdp_* ]] || die "set MAPCOVA_PUBLISHER_TOKEN to an mdp_ publisher token (or DRY_RUN=1)"
 fi
 
 if [[ -n ${WORK_DIR:-} ]]; then
@@ -74,7 +77,12 @@ publish_profile() {
   [[ -z ${VERSION:-} ]] || pack+=("--version=$VERSION")
   [[ $DRY_RUN == 1 ]] || pack+=("--push=$UPDATES_URL")
   echo "== $ZONE-$profile: pack$([[ $DRY_RUN == 1 ]] || echo ' and push')"
-  php "$UPDATES_DIR/bin/updates" data:pack-graph "${pack[@]}"
+  # The token goes to this one process only, never into the environment of the builds and checks.
+  if [[ $DRY_RUN == 1 ]]; then
+    php "$UPDATES_DIR/bin/updates" data:pack-graph "${pack[@]}"
+  else
+    MAPCOVA_PUBLISHER_TOKEN=$PUBLISHER_TOKEN php "$UPDATES_DIR/bin/updates" data:pack-graph "${pack[@]}"
+  fi
 }
 
 has_tolls() {
