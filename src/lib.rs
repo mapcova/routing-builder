@@ -363,15 +363,50 @@ pub fn build_data(data: &OsmData, opt: &BuildOptions, log: &dyn Fn(&str)) -> Bui
     }
 }
 
-/// Reads `input` (an OSM PBF extract) and writes the graph to `out`.
-pub fn build_file(input: &str, out: &str, opt: &BuildOptions) -> Result<(), String> {
+/// Text of the arcs before contraction, one `src dst weight duration distance` line per arc, sorted. The PHP builder
+/// (`php/`) writes the same list: diffing the two checks that both build the same graph.
+pub fn dump_arcs_text(arcs: &[Arc]) -> String {
+    let mut rows: Vec<[u32; 5]> = arcs.iter().map(|a| [a.src, a.dst, a.w, a.t, a.d]).collect();
+    rows.sort_unstable();
+    let mut text = String::with_capacity(rows.len() * 24);
+    for r in rows {
+        text.push_str(&format!("{} {} {} {} {}\n", r[0], r[1], r[2], r[3], r[4]));
+    }
+    text
+}
+
+/// Reads `input` (an OSM PBF extract) and writes the graph to `out`; with `dump_arcs`, also the arcs before
+/// contraction (see `dump_arcs_text`; `opt.keep_arcs` must be set).
+pub fn build_file(input: &str, out: &str, opt: &BuildOptions, dump_arcs: Option<&str>) -> Result<(), String> {
     let t0 = Instant::now();
     let log = |what: &str| eprintln!("[{:7.1}s] {}", t0.elapsed().as_secs_f64(), what);
     let data = osm::read(input, opt.profile, &log)?;
     let built = build_data(&data, opt, &log);
     drop(data);
     file::write(out, &built.bytes).map_err(|e| format!("cannot write {out}: {e}"))?;
+    if let Some(path) = dump_arcs {
+        std::fs::write(path, dump_arcs_text(&built.arcs)).map_err(|e| format!("cannot write {path}: {e}"))?;
+    }
     eprint!("{}", built.report);
     log(&format!("wrote {out} ({} bytes)", built.bytes.len()));
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn arc_dump_is_sorted_and_keeps_parallel_arcs() {
+        let a = |src, dst, w, t, d| Arc {
+            src,
+            dst,
+            w,
+            t,
+            d,
+            sd: net::NONE,
+        };
+        let text = dump_arcs_text(&[a(2, 1, 5, 5, 9), a(0, 3, 7, 6, 1), a(0, 3, 7, 5, 2), a(0, 1, 1, 1, 1)]);
+        assert_eq!(text, "0 1 1 1 1\n0 3 7 5 2\n0 3 7 6 1\n2 1 5 5 9\n");
+    }
 }

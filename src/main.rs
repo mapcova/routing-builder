@@ -33,6 +33,10 @@ enum Command {
         /// Osmosis .poly file of the zone, stored (simplified) in the header; default: the extract's bounding box
         #[arg(long)]
         poly: Option<String>,
+        /// Also write the arcs of the graph before contraction (sorted `src dst weight duration distance` lines),
+        /// to compare with the PHP builder
+        #[arg(long)]
+        dump_arcs: Option<String>,
     },
     /// Print the header and metadata of a graph file.
     Info { file: String },
@@ -91,6 +95,7 @@ fn main() -> ExitCode {
             input,
             out,
             poly,
+            dump_arcs,
         } => {
             let Some(profile) = Profile::parse(&profile) else {
                 return fail("profile must be car, car-notoll, bike or foot");
@@ -104,13 +109,13 @@ fn main() -> ExitCode {
                 zone,
                 profile,
                 polygon,
-                keep_arcs: false,
+                keep_arcs: dump_arcs.is_some(),
                 built_at: 0,
             };
             // deep shortcut chains are unpacked recursively
             let child = std::thread::Builder::new()
                 .stack_size(512 << 20)
-                .spawn(move || build_file(&input, &out, &opt))
+                .spawn(move || build_file(&input, &out, &opt, dump_arcs.as_deref()))
                 .expect("thread");
             match child.join() {
                 Ok(Ok(())) => ExitCode::SUCCESS,

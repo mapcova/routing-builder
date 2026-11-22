@@ -6,7 +6,7 @@ process. The expensive work (cutting the network into segments, applying turn ru
 Hierarchy) happens here, once per zone and per profile; a route then costs a few thousand small file reads.
 
 ```
-mcr build --profile car|car-notoll|bike|foot --zone <id> --input <extract.osm.pbf> --out <file.mcr> [--poly <zone.poly>]
+mcr build --profile car|car-notoll|bike|foot --zone <id> --input <extract.osm.pbf> --out <file.mcr> [--poly <zone.poly>] [--dump-arcs <file>]
 mcr info <file.mcr>
 mcr witnesses <file.mcr> [--count 20] [--seed 1] [--out routes.json]
 ```
@@ -48,6 +48,14 @@ provider. Without it, the bounding box of the network is the zone.
 Cost (Apple M-series, one core for the hierarchy): Luxembourg 2 s and 0.3 GB, Switzerland with Liechtenstein
 45 s and 3.1 GB. Memory is about 10 bytes per OSM way node plus the graph; a 16 GB runner is enough for countries of
 that size.
+
+## The same builder in PHP (`php/`)
+
+[`php/`](php/README.md) is a pure-PHP port of the builder for hosts that only run PHP (no FFI, no extension, OPcache and JIT
+off): it builds the same `.mcr` in resumable slices of at most a few minutes, `php/bin/build.php --tile lu --profile car
+--input lu.osm.pbf --out lu-car.mcr --slice 240 --memory 256M`. It is checked against this builder: the arcs of the graph
+before contraction (`mcr build --dump-arcs <file>`) are identical, so are the segment, geometry, grid and metadata
+sections, and routes have the same weight. Measurements in [php/BENCHMARKS.md](php/BENCHMARKS.md).
 
 ## Route checks and publishing
 
