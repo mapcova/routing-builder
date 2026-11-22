@@ -7,6 +7,8 @@ namespace MapCova\GraphBuilder\Osm;
 use MapCova\GraphBuilder\Pbf\Block;
 use MapCova\GraphBuilder\Pbf\Wire;
 use MapCova\GraphBuilder\Profile\Profile;
+use MapCova\GraphBuilder\Support\Bin;
+use RuntimeException;
 
 /**
  * First pass over an extract: the ways the profile keeps and the turn restrictions, as binary records.
@@ -21,8 +23,14 @@ final class WaysPass
     public const WAY_HEADER = 33;
     public const RESTRICTION_HEADER = 29;
 
-    public function __construct(private readonly Profile $profile)
+    /** @param int $lastWayId id of the last way kept by an earlier launch (-1 at the start): ids must keep rising */
+    public function __construct(private readonly Profile $profile, private int $lastWayId = -1)
     {
+    }
+
+    public function lastWayId(): int
+    {
+        return $this->lastWayId;
     }
 
     /** @return array{ways:string,restrictions:string,nWays:int,nRestrictions:int} */
@@ -120,12 +128,17 @@ final class WaysPass
         if ($way === null) {
             return null;
         }
+        if ($id <= $this->lastWayId) {
+            // the Rust builder sorts the ways it reads; reading in file order numbers the same only if they are sorted
+            throw new RuntimeException("the ways of the extract are not sorted by id (way $id after {$this->lastWayId}): sort it with osmium sort");
+        }
+        $this->lastWayId = $id;
         $nodes = Wire::packedDelta($d, $refs[0], $refs[1]);
         $flags = ($way->restricted ? 1 : 0) | ($way->startpoint ? 2 : 0) | ($way->toll ? 4 : 0)
             | ($way->duration !== null ? 8 : 0);
 
         return pack('PVggggCg', $id, \count($nodes), $way->fwdSpeed, $way->fwdRate, $way->bwdSpeed, $way->bwdRate, $flags, $way->duration ?? 0.0)
-            . pack('P*', ...$nodes);
+            . Bin::packAll('P', $nodes);
     }
 
     /** @param list<string> $st */
@@ -212,6 +225,6 @@ final class WaysPass
         }
 
         return pack('PPPCV', $from, $to, $viaNode ?? -1, str_starts_with($val, 'only_') ? 1 : 0, \count($viaWays))
-            . ($viaWays === [] ? '' : pack('P*', ...$viaWays));
+            . ($viaWays === [] ? '' : Bin::packAll('P', $viaWays));
     }
 }

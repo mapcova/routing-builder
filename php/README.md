@@ -44,8 +44,20 @@ php bin/build.php --tile lu --profile car --input lu.osm.pbf --out lu-car.mcr --
 | `--keep-work` | keep the work directory after the file is written |
 
 **Exit status**: `0` the file is written, `10` the slice is over and there is more to do (launch it again), `1` an error,
-`2` bad arguments. A scheduler loops on `10`: a web cron calls the script, and when it exits with `10` and time is left,
+`2` bad arguments, `11` another launch is running in the same work directory (nothing was done: try again later). A
+scheduler loops on `10` and waits on `11`: a web cron calls the script, and when it exits with `10` and time is left,
 calls its own URL again (the design: `mapcova-updates` already does this for the address data).
+
+**One launch at a time.** A launch holds an exclusive `flock` on `<work>/.lock` from start to end; the operating system
+drops it with the process, however it ends (`kill -9` included), so a crashed launch never blocks the next. Temporary files
+carry a random suffix, and a launch removes those a killed one left.
+
+**What identifies a build.** `state.json` stores a key made of the version of the code, the input (path, size, modification
+time), the profile, the zone, the `.poly`, `--out` and `--dump-arcs`. A work directory is resumed only by the same key. A
+finished build is "already built" (exit 0) only when the key matches **and** the output file is there; if the output is gone,
+or the options or the input changed, the next launch starts over and replaces the file atomically when it is done. A work
+directory in the middle of another build is refused (exit 1) rather than overwritten; a directory whose `state.json` is lost
+or unreadable is emptied first, so that no stale phase file or contraction state is ever reused.
 
 ### Phases and checkpoints
 
@@ -59,7 +71,7 @@ checkpoint, and the next launch cuts the files back to the recorded lengths.
 | `needed` | external sort (sorted runs, one merge) of the node ids the ways use | restarts (seconds) |
 | `nodes` | streams the PBF again: coordinates and flags by a **sorted merge** with the needed ids, no id table in memory | the blob and the position in the needed ids |
 | `graph` | network, arcs, strongly connected component, segments, geometry, grid | restarts (a few seconds on LU) |
-| `contract` | the hierarchy: priority queue, witness searches; `up.bin` grows, the state (`contract.state`, a few MB) is saved when the slice ends | the contracted node |
+| `contract` | the hierarchy: priority queue, witness searches; `up.bin` grows, the state (`contract.state`) is saved when the slice ends, or earlier when the memory in use passes 40 % of the limit and keeps growing | the contracted node |
 | `finish` | final ids (rank from the top), sections, file | restarts (seconds) |
 
 The contraction is **deterministic** (priorities `1000 * (0.1 * level + (shortcuts + 1) / (arcs + 1))`, witness limits
@@ -68,6 +80,22 @@ run, whatever the number and the moments of the interruptions (`tests/BuilderTes
 
 `needed`, `graph` and `finish` run whole: their time must fit a slice (it does for a tile of a few hundred thousand
 nodes; see the figures in [BENCHMARKS.md](BENCHMARKS.md)). A build that is killed inside one of them starts it again.
+
+Because those phases cannot be resumed, a process killed for memory in one of them would die the same way at every launch.
+So the builder estimates the peak before `graph` (330 bytes per kept node for the edge-based graph of `car`, 180 for the node-based one of `bike` and `foot`, from the Luxembourg measures with 20 % of margin) and before the start of `contract` (450 bytes per
+graph node, 130 per arc of the sort that loads them) and stops with an error that says what the zone needs, when that is
+above 85 % of the memory limit (`--memory`, else `memory_limit`): raise the limit or cut the zone.
+
+**The contraction state** is written to `contract.state` piece by piece (about 1 MB of memory, not a copy of the state),
+under a temporary name, checked, then renamed; it starts with the build key and the node count, which a restore checks, and
+ends with a mark, so a truncated or foreign file is refused. A restore reads it piece by piece too. When the memory in use
+passes 40 % of the limit and has grown by 5 % of it since the launch began, the contraction stops early (after at least 1000
+contracted nodes, so that it always advances) and saves, while there is room to do it; a state that is big from the start
+but not growing is saved at the end of the slice as usual.
+
+**Checked writes.** Every write is checked against its length (a short write is continued, a refusal is an error), as are
+`fflush`, `fclose`, the bytes copied into each section, and the size of the `.part` file before it is renamed: a full disk
+ends the build with an error, never with a silently shorter file.
 
 ### Memory
 
@@ -123,6 +151,7 @@ composer install
 vendor/bin/phpunit          # profiles, PBF reader and passes, contraction (resumed and not), whole builds, resume after a kill
 vendor/bin/phpstan analyse  # level max
 tools/kill-resume-test.sh lu.osm.pbf car 10          # kill -9 at random moments, files byte-identical
+tools/synthetic-check.sh                             # the same on the small town of the tests (seconds); MCR=... adds the Rust parity
 ```
 
 `tests/Support/PbfWriter.php` writes small PBF files; `GridMap` is a town with a one-way street, signals, a barrier,

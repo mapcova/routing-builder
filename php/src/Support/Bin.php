@@ -86,6 +86,22 @@ final class Bin
         return $s === '' ? [] : self::list('P*', $s);
     }
 
+    /**
+     * `pack($code . '*', ...$values)` in chunks: spreading a big array into the arguments of `pack` costs a second copy
+     * of it, and a call with millions of arguments fails.
+     *
+     * @param list<int> $values
+     */
+    public static function packAll(string $code, array $values): string
+    {
+        $out = '';
+        foreach (array_chunk($values, 4096) as $part) {
+            $out .= pack($code . '*', ...$part);
+        }
+
+        return $out;
+    }
+
     /** A signed 32-bit value stored as u32. */
     public static function signed32(int $v): int
     {

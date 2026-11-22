@@ -46,6 +46,29 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Set up PHP
+        uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # 2.40.0
+        with:
+          php-version: '8.5'
+          extensions: zlib, json
+          coverage: none
+          tools: composer:v2
+          ini-values: opcache.enable_cli=0, memory_limit=512M
+
+      - name: Find the Composer cache
+        id: composer-cache
+        working-directory: php
+        run: echo "dir=$(composer config cache-files-dir)" >> "$GITHUB_OUTPUT"
+
+      # pull requests only read the cache; the main branch writes it (an entry written by a PR would never be used by the others)
+      - name: Restore the Composer cache
+        id: cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.composer-cache.outputs.dir }}
+          key: composer-${{ runner.os }}-${{ hashFiles('php/composer.lock') }}
+          restore-keys: composer-${{ runner.os }}-
+
       - name: Install, analyse and test
         working-directory: php
         run: |
@@ -53,3 +76,14 @@ jobs:
           composer install --no-interaction --prefer-dist
           vendor/bin/phpstan analyse --no-progress --memory-limit=1G
           vendor/bin/phpunit
+
+      - name: Kill -9 and resume on the synthetic town
+        working-directory: php
+        run: tools/synthetic-check.sh "$RUNNER_TEMP/synthetic" 6
+
+      - name: Save the Composer cache
+        if: github.event_name != 'pull_request' && steps.cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.composer-cache.outputs.dir }}
+          key: composer-${{ runner.os }}-${{ hashFiles('php/composer.lock') }}

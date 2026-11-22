@@ -11,6 +11,10 @@ use RuntimeException;
 /** Streams the blobs of an OSM PBF file; `$offset` resumes at a blob boundary. */
 final class PbfReader
 {
+    /** Limits of the PBF specification: a blob header is under 64 KiB, a blob and its uncompressed block under 32 MiB. */
+    private const MAX_HEADER = 64 << 10;
+    private const MAX_BLOB = 32 << 20;
+
     /**
      * @return Generator<int,array{type:string,data:string,next:int}> keyed by the file offset the blob starts at;
      *   `data` is the decompressed block, `next` the offset of the following blob
@@ -32,6 +36,9 @@ final class PbfReader
                     break;
                 }
                 $hl = Bin::ints('Nlen', $l)['len'];
+                if ($hl > self::MAX_HEADER) {
+                    throw new RuntimeException("not a PBF file: a blob header of $hl bytes (the limit is " . self::MAX_HEADER . ')');
+                }
                 $h = self::read($f, $hl);
                 $p = 0;
                 $type = '';
@@ -56,6 +63,9 @@ final class PbfReader
                         throw new RuntimeException("unexpected wire type $wt in a blob header");
                     }
                 }
+                if ($ds > self::MAX_BLOB) {
+                    throw new RuntimeException("a PBF blob of $ds bytes is over the limit of " . self::MAX_BLOB);
+                }
                 $blob = self::read($f, $ds);
                 yield $at => ['type' => $type, 'data' => self::inflate($blob), 'next' => $at + 4 + $hl + $ds];
             }
@@ -67,7 +77,15 @@ final class PbfReader
     /** @param resource $f */
     private static function read($f, int $n): string
     {
-        return $n > 0 ? (string) fread($f, $n) : '';
+        if ($n <= 0) {
+            return '';
+        }
+        $s = (string) fread($f, $n);
+        if (\strlen($s) !== $n) {
+            throw new RuntimeException('truncated PBF file');
+        }
+
+        return $s;
     }
 
     private static function inflate(string $b): string
@@ -84,9 +102,9 @@ final class PbfReader
                 if ($field === 1) {
                     $raw = substr($b, $p, $len);
                 } elseif ($field === 3) {
-                    $raw = gzuncompress(substr($b, $p, $len));
+                    $raw = @gzuncompress(substr($b, $p, $len), self::MAX_BLOB);
                     if ($raw === false) {
-                        throw new RuntimeException('corrupt zlib data in a PBF blob');
+                        throw new RuntimeException('corrupt zlib data in a PBF blob, or a block over ' . self::MAX_BLOB . ' bytes');
                     }
                 } elseif ($field >= 4 && $field <= 7) {
                     throw new RuntimeException('unsupported blob compression (only raw and zlib are read)');

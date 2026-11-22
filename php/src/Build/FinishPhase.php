@@ -9,6 +9,7 @@ use MapCova\GraphBuilder\Mcr\Format;
 use MapCova\GraphBuilder\Net\Net;
 use MapCova\GraphBuilder\Profile\Profile;
 use MapCova\GraphBuilder\Support\Bin;
+use MapCova\GraphBuilder\Support\Io;
 use MapCova\GraphBuilder\Support\Json;
 use RuntimeException;
 
@@ -56,65 +57,95 @@ final class FinishPhase
         $fFwd = self::out($w, 'sec-up_fwd.bin');
         $fBwd = self::out($w, 'sec-up_bwd.bin');
         $up = fopen($w->path('up.bin'), 'rb');
-        if ($up === false) {
-            throw new RuntimeException('cannot open up.bin');
-        }
         $nFwd = 0;
         $nBwd = 0;
-        $bufN = '';
-        $bufF = '';
-        $bufB = '';
-        for ($ni = 0; $ni < $n; $ni++) {
-            $old = $ni < $nn ? $order[$nn - 1 - $ni] : $ni;
-            $bufN .= pack('VVV', $nFwd, $nBwd, $segdir[$old] ?? 0);
-            if ($ni < $nn) {
-                $r = $nn - 1 - $ni;
-                $len = ($r + 1 < $nn ? $idx[$r + 1] : $upSize) - $idx[$r];
-                fseek($up, $idx[$r]);
-                $raw = $len > 0 ? (string) fread($up, $len) : '';
-                $u = Bin::allU32($raw);
-                $cf = $u[1];
-                $cb = $u[2];
-                $p = 3;
-                for ($k = 0; $k < $cf + $cb; $k++, $p += 5) {
-                    $mid = $u[$p + 2];
-                    $rec = pack('VVVVV', $newId[$u[$p]], $u[$p + 1], $u[$p + 3], $u[$p + 4], ($mid & Contractor::ORIGINAL) !== 0 ? $mid : $newId[$mid]);
-                    if ($k < $cf) {
-                        $bufF .= $rec;
-                        $nFwd++;
-                    } else {
-                        $bufB .= $rec;
-                        $nBwd++;
+        try {
+            if ($up === false) {
+                throw new RuntimeException('cannot open up.bin');
+            }
+            $bufN = '';
+            $bufF = '';
+            $bufB = '';
+            for ($ni = 0; $ni < $n; $ni++) {
+                $old = $ni < $nn ? $order[$nn - 1 - $ni] : $ni;
+                $bufN .= pack('VVV', $nFwd, $nBwd, $segdir[$old] ?? 0);
+                if ($ni < $nn) {
+                    $r = $nn - 1 - $ni;
+                    $len = ($r + 1 < $nn ? $idx[$r + 1] : $upSize) - $idx[$r];
+                    fseek($up, $idx[$r]);
+                    $raw = $len > 0 ? (string) fread($up, $len) : '';
+                    if (\strlen($raw) !== $len) {
+                        throw new RuntimeException('up.bin is shorter than its index');
+                    }
+                    $u = Bin::allU32($raw);
+                    $cf = $u[1];
+                    $cb = $u[2];
+                    $p = 3;
+                    for ($k = 0; $k < $cf + $cb; $k++, $p += 5) {
+                        $mid = $u[$p + 2];
+                        $rec = pack('VVVVV', $newId[$u[$p]], $u[$p + 1], $u[$p + 3], $u[$p + 4], ($mid & Contractor::ORIGINAL) !== 0 ? $mid : $newId[$mid]);
+                        if ($k < $cf) {
+                            $bufF .= $rec;
+                            $nFwd++;
+                        } else {
+                            $bufB .= $rec;
+                            $nBwd++;
+                        }
                     }
                 }
+                if (\strlen($bufN) > 1 << 20 || \strlen($bufF) > 1 << 20 || \strlen($bufB) > 1 << 20) {
+                    Io::write($fNodes, $bufN, 'sec-nodes.bin');
+                    Io::write($fFwd, $bufF, 'sec-up_fwd.bin');
+                    Io::write($fBwd, $bufB, 'sec-up_bwd.bin');
+                    $bufN = $bufF = $bufB = '';
+                }
             }
-            if (\strlen($bufN) > 1 << 20 || \strlen($bufF) > 1 << 20 || \strlen($bufB) > 1 << 20) {
-                fwrite($fNodes, $bufN);
-                fwrite($fFwd, $bufF);
-                fwrite($fBwd, $bufB);
-                $bufN = $bufF = $bufB = '';
+            Io::write($fNodes, $bufN . pack('VVV', $nFwd, $nBwd, 0), 'sec-nodes.bin');
+            Io::write($fFwd, $bufF, 'sec-up_fwd.bin');
+            Io::write($fBwd, $bufB, 'sec-up_bwd.bin');
+            Io::close($fNodes, 'sec-nodes.bin');
+            Io::close($fFwd, 'sec-up_fwd.bin');
+            Io::close($fBwd, 'sec-up_bwd.bin');
+        } finally {
+            foreach ([$fNodes, $fFwd, $fBwd, $up] as $h) {
+                if (\is_resource($h)) {
+                    fclose($h);
+                }
             }
         }
-        fwrite($fNodes, $bufN . pack('VVV', $nFwd, $nBwd, 0));
-        fwrite($fFwd, $bufF);
-        fwrite($fBwd, $bufB);
-        fclose($fNodes);
-        fclose($fFwd);
-        fclose($fBwd);
-        fclose($up);
         unset($order, $idx, $u);
 
-        // segments: graph node fields in final ids
-        $seg = (string) file_get_contents($w->path('segments.bin'));
-        $segOut = [];
-        for ($s = 0; $s < $nseg; $s++) {
-            $r = Bin::u32s($seg, 10, $s * Format::SEG_BYTES);
-            $r[6] = $r[6] === Net::NONE ? Net::NONE : $newId[$r[6]];
-            $r[7] = $r[7] === Net::NONE ? Net::NONE : $newId[$r[7]];
-            $segOut[] = pack('V10', ...$r);
+        // segments: graph node fields in final ids, a few thousand at a time
+        $segIn = fopen($w->path('segments.bin'), 'rb');
+        $fSeg = self::out($w, 'sec-segments.bin');
+        try {
+            if ($segIn === false) {
+                throw new RuntimeException('cannot open segments.bin');
+            }
+            for ($s = 0; $s < $nseg; $s += 4096) {
+                $m = min(4096, $nseg - $s);
+                $seg = (string) fread($segIn, max(1, $m * Format::SEG_BYTES));
+                if (\strlen($seg) !== $m * Format::SEG_BYTES) {
+                    throw new RuntimeException('segments.bin is shorter than graph.json says');
+                }
+                $segOut = '';
+                for ($k = 0; $k < $m; $k++) {
+                    $r = Bin::u32s($seg, 10, $k * Format::SEG_BYTES);
+                    $r[6] = $r[6] === Net::NONE ? Net::NONE : $newId[$r[6]];
+                    $r[7] = $r[7] === Net::NONE ? Net::NONE : $newId[$r[7]];
+                    $segOut .= pack('V10', ...$r);
+                }
+                Io::write($fSeg, $segOut, 'sec-segments.bin');
+            }
+            Io::close($fSeg, 'sec-segments.bin');
+        } finally {
+            foreach ([$segIn, $fSeg] as $h) {
+                if (\is_resource($h)) {
+                    fclose($h);
+                }
+            }
         }
-        $w->writeAtomic('sec-segments.bin', implode('', $segOut));
-        unset($segOut, $seg);
+        unset($seg, $segOut);
 
         // shadows, sorted by original node
         $shRaw = (string) file_get_contents($w->path('shadows.bin'));
@@ -192,21 +223,37 @@ final class FinishPhase
         if ($f === false) {
             throw new RuntimeException("cannot write $part");
         }
-        fwrite($f, $head);
-        foreach ($sections as $i => $name) {
-            $in = fopen($w->path($name), 'rb');
-            if ($in === false) {
-                throw new RuntimeException("cannot read $name");
+        try {
+            Io::write($f, $head, $part);
+            $total = \strlen($head);
+            foreach ($sections as $i => $name) {
+                $in = fopen($w->path($name), 'rb');
+                if ($in === false) {
+                    throw new RuntimeException("cannot read $name");
+                }
+                try {
+                    Io::copy($in, $f, $lengths[$i], $name);
+                } finally {
+                    fclose($in);
+                }
+                $pad = (4096 - $lengths[$i] % 4096) % 4096;
+                Io::write($f, str_repeat("\0", $pad), $part);
+                $total += $lengths[$i] + $pad;
             }
-            stream_copy_to_stream($in, $f);
-            fclose($in);
-            $pad = (4096 - $lengths[$i] % 4096) % 4096;
-            fwrite($f, str_repeat("\0", $pad));
-        }
-        fflush($f);
-        fclose($f);
-        if (!rename($part, $outPath)) {
-            throw new RuntimeException("cannot rename $part to $outPath");
+            Io::close($f, $part);
+            clearstatcache(true, $part);
+            if (filesize($part) !== $total) {
+                throw new RuntimeException("$part has " . filesize($part) . " bytes, expected $total");
+            }
+            if (!rename($part, $outPath)) {
+                throw new RuntimeException("cannot rename $part to $outPath");
+            }
+        } catch (\Throwable $e) {
+            if (\is_resource($f)) {
+                fclose($f);
+            }
+            @unlink($part);
+            throw $e;
         }
 
         return ['nodes' => $n, 'up_fwd' => $nFwd, 'up_bwd' => $nBwd, 'segments' => $nseg, 'bytes' => (int) filesize($outPath)];

@@ -12,6 +12,7 @@ use MapCova\GraphBuilder\Net\NodeGraph;
 use MapCova\GraphBuilder\Net\Scc;
 use MapCova\GraphBuilder\Profile\Profile;
 use MapCova\GraphBuilder\Support\Bin;
+use MapCova\GraphBuilder\Support\Io;
 
 /**
  * Phase `graph`: from the way and node files, the network, the graph to contract, and everything of the `.mcr` file that
@@ -75,7 +76,7 @@ final class GraphPhase
 
         self::writeArcs($w, $arcs);
         if ($segdir !== []) {
-            $w->writeAtomic('segdir.bin', pack('V*', ...$segdir));
+            $w->writeAtomic('segdir.bin', Bin::packAll('V', $segdir));
         } else {
             $w->writeAtomic('segdir.bin', '');
         }
@@ -175,7 +176,7 @@ final class GraphPhase
             sort($v);
             $v = array_values(array_unique($v));
             $gdir .= pack('VV', $key, \strlen($glist));
-            $glist .= pack('V', \count($v)) . pack('V*', ...$v);
+            $glist .= pack('V', \count($v)) . Bin::packAll('V', $v);
         }
         $w->writeAtomic('grid_dir.bin', $gdir);
         $w->writeAtomic('grid_lists.bin', $glist);
@@ -222,20 +223,31 @@ final class GraphPhase
         }
         fclose($f);
         sort($keys, SORT_STRING);
-        $out = fopen($outPath . '.part', 'wb');
+        $part = $outPath . '.part';
+        $out = fopen($part, 'wb');
         if ($out === false) {
             throw new \RuntimeException("cannot write $outPath");
         }
-        $buf = '';
-        foreach ($keys as $k) {
-            $buf .= implode(' ', Bin::list('N5', $k)) . "\n";
-            if (\strlen($buf) >= 1 << 20) {
-                fwrite($out, $buf);
-                $buf = '';
+        try {
+            $buf = '';
+            foreach ($keys as $k) {
+                $buf .= implode(' ', Bin::list('N5', $k)) . "\n";
+                if (\strlen($buf) >= 1 << 20) {
+                    Io::write($out, $buf, $part);
+                    $buf = '';
+                }
             }
+            Io::write($out, $buf, $part);
+            Io::close($out, $part);
+        } catch (\Throwable $e) {
+            if (\is_resource($out)) {
+                fclose($out);
+            }
+            @unlink($part);
+            throw $e;
         }
-        fwrite($out, $buf);
-        fclose($out);
-        rename($outPath . '.part', $outPath);
+        if (!rename($part, $outPath)) {
+            throw new \RuntimeException("cannot rename $part to $outPath");
+        }
     }
 }

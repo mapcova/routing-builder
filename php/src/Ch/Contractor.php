@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace MapCova\GraphBuilder\Ch;
 
 use MapCova\GraphBuilder\Support\Bin;
+use MapCova\GraphBuilder\Support\Io;
 use MapCova\GraphBuilder\Support\IntMinHeap;
 use RuntimeException;
 
@@ -29,6 +30,10 @@ final class Contractor
     private const NODE_BITS = 25;
     private const NODE_MASK = (1 << self::NODE_BITS) - 1;
     private const BUFFER = 1 << 20;
+    private const CHECKPOINT_MAGIC = 'MCRCHK03';
+    private const CHECKPOINT_END = 'MCRCHEND';
+    /** Share of the memory limit above which `run()` stops early, to checkpoint while there is room to do it. */
+    public const MEMORY_SHARE = 0.4;
 
     /** @var array<int,string> */
     private array $out;
@@ -56,6 +61,10 @@ final class Contractor
     private int $avoid = -1;
     private int $nSettled = 0;
 
+    private int $memoryCap = 0;
+    private int $minSteps = 1000;
+    private int $memoryGrowth = 0;
+
     /** @var resource|null */
     private $up = null;
     /** @var resource|null */
@@ -78,6 +87,9 @@ final class Contractor
         private readonly int $neighbourSettled = 100,
         private readonly int $contractionSettled = 500,
     ) {
+        if ($n > self::NODE_MASK) {
+            throw new RuntimeException("$n nodes are more than the contraction numbers (" . self::NODE_MASK . '): cut the zone smaller');
+        }
         $this->out = array_fill(0, $n, '');
         $this->in = array_fill(0, $n, '');
         $this->td = array_fill(0, $n, '');
@@ -131,6 +143,20 @@ final class Contractor
         return $c;
     }
 
+    /**
+     * Makes `run()` stop early (as at a deadline) once the memory in use passes `MEMORY_SHARE` of `$limit` bytes and has
+     * grown by `$growth` bytes (default 5 % of the limit) since the contraction of this call began, so that the state
+     * is saved while there is room, not when the process is about to be killed. A state that is big from the start but
+     * does not grow (the usual case: the contraction frees more than it adds) is saved at the deadline as ever, not
+     * after every thousand nodes. A call contracts `$minSteps` nodes first: it always makes progress. 0 = no limit.
+     */
+    public function setMemoryLimit(int $limit, int $minSteps = 1000, ?int $growth = null): void
+    {
+        $this->memoryCap = $limit > 0 ? (int) ($limit * self::MEMORY_SHARE) : 0;
+        $this->minSteps = $minSteps;
+        $this->memoryGrowth = $growth ?? (int) ($limit * 0.05);
+    }
+
     /** @return int number of contracted nodes so far */
     public function rank(): int
     {
@@ -158,6 +184,9 @@ final class Contractor
     /** Adds the arc `$u -> $v` or lowers its weight (an equal one stays), as `PreparationGraph::add_or_reduce_edge`. */
     private function addOrReduce(int $u, int $v, int $w, int $c, int $t, int $d): void
     {
+        if ($w > 0xFFFFFFFF || $t > 0xFFFFFFFF || $d > 0xFFFFFFFF) {
+            throw new RuntimeException('a shortcut is too long to be stored in 32 bits: cut the zone smaller');
+        }
         $p = self::recPos($this->out[$u], pack('V', $v), 12);
         if ($p < 0) {
             $this->out[$u] .= pack('VVV', $v, $w, $c);
@@ -306,9 +335,13 @@ final class Contractor
                 throw new RuntimeException("cannot open $path");
             }
             if ($size < 0 || filesize($path) < $size) {
+                fclose($f);
                 throw new RuntimeException("$path is shorter than its checkpoint");
             }
-            ftruncate($f, $size);
+            if (!ftruncate($f, $size)) {
+                fclose($f);
+                throw new RuntimeException("cannot cut $path back to $size bytes");
+            }
             clearstatcache(true, $path);
             fseek($f, $size);
             $this->$name = $f;
@@ -320,8 +353,8 @@ final class Contractor
         foreach ([['up', 'upBuf', 'upSize'], ['idx', 'idxBuf', 'idxSize'], ['ord', 'ordBuf', 'ordSize']] as [$h, $b, $s]) {
             $f = $this->$h;
             if (\is_resource($f)) {
-                fwrite($f, $this->$b);
-                fflush($f);
+                Io::write($f, $this->$b, $h);
+                Io::flush($f, $h);
                 $this->$s += \strlen($this->$b);
                 $this->$b = '';
             }
@@ -359,6 +392,8 @@ final class Contractor
                 }
             }
             $q = $this->queue;
+            $steps = 0;
+            $startUsage = memory_get_usage();
             while (!$q->isEmpty()) {
                 $k = $q->extract();
                 $x = $k & self::NODE_MASK;
@@ -366,21 +401,33 @@ final class Contractor
                     continue;
                 }
                 $this->contract($x);
-                if (hrtime(true) > $deadline) {
+                ++$steps;
+                if (hrtime(true) > $deadline || ($this->memoryCap > 0 && $steps >= $this->minSteps && ($steps & 63) === 0 && $this->memoryAlarm($startUsage))) {
                     return $q->isEmpty() && $this->rank >= $this->n;
                 }
             }
 
             return true;
         } finally {
-            $this->flush();
-            foreach (['up', 'idx', 'ord'] as $h) {
-                if (\is_resource($this->$h)) {
-                    fclose($this->$h);
+            try {
+                $this->flush();
+            } finally {
+                foreach (['up', 'idx', 'ord'] as $h) {
+                    if (\is_resource($this->$h)) {
+                        fclose($this->$h);
+                    }
+                    $this->$h = null;
                 }
-                $this->$h = null;
             }
         }
+    }
+
+    /** True when the memory in use is over its cap and has grown since `$startUsage` by more than the allowed growth. */
+    private function memoryAlarm(int $startUsage): bool
+    {
+        $u = memory_get_usage();
+
+        return $u > $this->memoryCap && $u > $startUsage + $this->memoryGrowth;
     }
 
     private function contract(int $x): void
@@ -443,88 +490,134 @@ final class Contractor
         }
     }
 
-    /** The state to resume from (call after `run()` returned): output files are flushed, their sizes recorded. */
-    public function checkpoint(): string
-    {
-        return serialize([
-            'n' => $this->n,
-            'out' => $this->out,
-            'in' => $this->in,
-            'td' => $this->td,
-            'prio' => $this->prio,
-            'level' => $this->level,
-            'alive' => $this->alive,
-            'rank' => $this->rank,
-            'initNext' => $this->initNext,
-            'shortcuts' => $this->shortcuts,
-            'upSize' => $this->upSize,
-            'idxSize' => $this->idxSize,
-            'ordSize' => $this->ordSize,
-        ]);
-    }
 
-    /** @return array<int,string> */
-    private static function strMap(mixed $v): array
+    /**
+     * Saves the state to resume from (call after `run()` returned: the output files are flushed, their sizes recorded).
+     * The file is written piece by piece to a temporary name, checked and renamed, so the memory it needs is about 1 MB,
+     * not a second copy of the state, and a killed process leaves the previous checkpoint whole.
+     *
+     * Layout: magic, build key (u32 length, bytes), seven u64 (n, rank, initNext, shortcuts, upSize, idxSize, ordSize),
+     * `alive` (n bytes), `prio` and `level` (n u64 each), then `out`, `in` and `td` (per node a u32 length and the
+     * bytes), the end mark.
+     */
+    public function checkpointTo(string $path, string $key): void
     {
-        if (!\is_array($v)) {
-            throw new RuntimeException('corrupt contraction state');
+        $tmp = $path . '.tmp.' . bin2hex(random_bytes(4));
+        $f = @fopen($tmp, 'wb');
+        if ($f === false) {
+            throw new RuntimeException("cannot write $tmp");
         }
-        $out = [];
-        foreach ($v as $k => $x) {
-            if (!\is_int($k) || !\is_string($x)) {
-                throw new RuntimeException('corrupt contraction state');
+        try {
+            $written = 0;
+            $buf = self::CHECKPOINT_MAGIC . pack('V', \strlen($key)) . $key
+                . pack('P7', $this->n, $this->rank, $this->initNext, $this->shortcuts, $this->upSize, $this->idxSize, $this->ordSize);
+            $put = static function () use ($f, $tmp, &$buf, &$written): void {
+                Io::write($f, $buf, $tmp);
+                $written += \strlen($buf);
+                $buf = '';
+            };
+            for ($i = 0; $i < $this->n; $i += 1 << 20) {
+                $buf .= substr($this->alive, $i, 1 << 20);
+                $put();
             }
-            $out[$k] = $x;
-        }
-
-        return $out;
-    }
-
-    /** @return array<int,int> */
-    private static function intMap(mixed $v): array
-    {
-        if (!\is_array($v)) {
-            throw new RuntimeException('corrupt contraction state');
-        }
-        $out = [];
-        foreach ($v as $k => $x) {
-            if (!\is_int($k) || !\is_int($x)) {
-                throw new RuntimeException('corrupt contraction state');
+            foreach ([$this->prio, $this->level] as $list) {
+                for ($i = 0; $i < $this->n; $i += 8192) {
+                    $buf .= Bin::packAll('P', \array_slice($list, $i, 8192));
+                    if (\strlen($buf) >= self::BUFFER) {
+                        $put();
+                    }
+                }
             }
-            $out[$k] = $x;
+            $put();
+            foreach (['out', 'in', 'td'] as $name) {
+                $strings = $this->$name;
+                for ($i = 0; $i < $this->n; $i++) {
+                    $buf .= pack('V', \strlen($strings[$i])) . $strings[$i];
+                    if (\strlen($buf) >= self::BUFFER) {
+                        $put();
+                    }
+                }
+            }
+            unset($strings);
+            $buf .= self::CHECKPOINT_END;
+            $put();
+            Io::close($f, $tmp);
+            $f = null;
+            clearstatcache(true, $tmp);
+            if (filesize($tmp) !== $written || !rename($tmp, $path)) {
+                throw new RuntimeException("cannot save the contraction state $path");
+            }
+        } catch (\Throwable $e) {
+            if (\is_resource($f)) {
+                @fclose($f);
+            }
+            @unlink($tmp);
+            throw $e;
         }
-
-        return $out;
     }
 
-    private static function intOf(mixed $v): int
+    /**
+     * Resumes from a file `checkpointTo` wrote, read piece by piece: the memory needed is the state itself.
+     * Refused when it belongs to another build (`$key`) or to a graph of another size (`$nodes`).
+     */
+    public static function restoreFrom(string $path, string $key, int $nodes, string $upPath, string $idxPath, string $ordPath): self
     {
-        if (!\is_int($v)) {
-            throw new RuntimeException('corrupt contraction state');
+        $r = new ChunkReader($path);
+        $magic = $r->take(8);
+        if ($magic !== self::CHECKPOINT_MAGIC) {
+            throw new RuntimeException("$path is not a contraction state of this version: remove the work directory");
         }
-
-        return $v;
-    }
-
-    public static function restore(string $state, string $upPath, string $idxPath, string $ordPath): self
-    {
-        $s = unserialize($state, ['allowed_classes' => false]);
-        if (!\is_array($s) || !isset($s['alive']) || !\is_string($s['alive'])) {
-            throw new RuntimeException('corrupt contraction state');
+        $kl = Bin::u32($r->take(4));
+        $saved = $kl > 1024 ? '' : $r->take($kl);
+        if ($saved !== $key) {
+            throw new RuntimeException("$path belongs to another build: remove the work directory");
         }
-        $c = new self(self::intOf($s['n'] ?? null), $upPath, $idxPath, $ordPath);
-        $c->out = self::strMap($s['out'] ?? null);
-        $c->in = self::strMap($s['in'] ?? null);
-        $c->td = self::strMap($s['td'] ?? null);
-        $c->prio = self::intMap($s['prio'] ?? null);
-        $c->level = self::intMap($s['level'] ?? null);
-        $c->alive = $s['alive'];
-        $c->rank = self::intOf($s['rank'] ?? null);
-        $c->initNext = self::intOf($s['initNext'] ?? null);
-        $c->shortcuts = self::intOf($s['shortcuts'] ?? null);
-        $c->upSize = self::intOf($s['upSize'] ?? null);
-        $c->idxSize = self::intOf($s['idxSize'] ?? null);
-        $c->ordSize = self::intOf($s['ordSize'] ?? null);
+        [$n, $rank, $initNext, $shortcuts, $upSize, $idxSize, $ordSize] = Bin::list('P7', $r->take(56));
+        if ($n !== $nodes) {
+            throw new RuntimeException("$path is for $n nodes, the graph has $nodes: remove the work directory");
+        }
+        $c = new self($n, $upPath, $idxPath, $ordPath);
+        $c->rank = $rank;
+        $c->initNext = $initNext;
+        $c->shortcuts = $shortcuts;
+        $c->upSize = $upSize;
+        $c->idxSize = $idxSize;
+        $c->ordSize = $ordSize;
+        $alive = '';
+        for ($i = 0; $i < $n; $i += 1 << 20) {
+            $alive .= $r->take(min(1 << 20, $n - $i));
+        }
+        $c->alive = $alive;
+        unset($alive);
+        for ($i = 0; $i < $n; $i += 8192) {
+            $m = min(8192, $n - $i);
+            foreach (Bin::list('P' . $m, $r->take($m * 8)) as $j => $v) {
+                $c->prio[$i + $j] = $v;
+            }
+        }
+        for ($i = 0; $i < $n; $i += 8192) {
+            $m = min(8192, $n - $i);
+            foreach (Bin::list('P' . $m, $r->take($m * 8)) as $j => $v) {
+                $c->level[$i + $j] = $v;
+            }
+        }
+        for ($i = 0; $i < $n; $i++) {
+            $len = Bin::u32($r->take(4));
+            $c->out[$i] = $len > 0 ? $r->take($len) : '';
+        }
+        for ($i = 0; $i < $n; $i++) {
+            $len = Bin::u32($r->take(4));
+            $c->in[$i] = $len > 0 ? $r->take($len) : '';
+        }
+        for ($i = 0; $i < $n; $i++) {
+            $len = Bin::u32($r->take(4));
+            $c->td[$i] = $len > 0 ? $r->take($len) : '';
+        }
+        $end = $r->take(8);
+        if ($end !== self::CHECKPOINT_END || !$r->atEnd()) {
+            throw new RuntimeException("$path is damaged: remove the work directory");
+        }
+        $r->close();
 
         return $c;
     }

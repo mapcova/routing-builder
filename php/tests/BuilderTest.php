@@ -5,6 +5,8 @@ declare(strict_types=1);
 namespace MapCova\GraphBuilder\Tests;
 
 use MapCova\GraphBuilder\Build\Builder;
+use MapCova\GraphBuilder\Build\BuilderBusy;
+use MapCova\GraphBuilder\Ch\Contractor;
 use MapCova\GraphBuilder\Build\Options;
 use MapCova\GraphBuilder\Support\Bin;
 use MapCova\GraphBuilder\Tests\Support\Dijkstra;
@@ -173,5 +175,155 @@ final class BuilderTest extends TestCase
     {
         $this->expectException(RuntimeException::class);
         new Builder(new Options('a', 'b', $this->dir . '/w2', 'Z!', 'car'));
+    }
+
+    private function smallExtract(string $path): void
+    {
+        $w = new \MapCova\GraphBuilder\Tests\Support\PbfWriter();
+        $w->node(1, 49.6, 6.1)->node(2, 49.601, 6.1)->node(3, 49.602, 6.1)->node(4, 49.602, 6.101)
+            ->way(10, [1, 2, 3, 4], ['highway' => 'residential']);
+        $w->write($path);
+    }
+
+    public function testADoneWorkDirectoryDoesNotAnswerForAnotherInput(): void
+    {
+        $o = $this->options('car', 'k');
+        $first = new Builder($o);
+        $first->runSlice();
+        self::assertTrue($first->isDone());
+        $before = (string) file_get_contents($this->dir . '/k.mcr');
+
+        // same work directory and output, another extract: not done, and the next launch builds the new graph
+        $this->smallExtract($this->dir . '/other.osm.pbf');
+        $o2 = new Options($this->dir . '/other.osm.pbf', $o->output, $o->workDir, 'town', 'car', 600.0, builtAt: 1700000000, dumpArcs: $o->dumpArcs);
+        $second = new Builder($o2);
+        self::assertFalse($second->isDone());
+        self::assertTrue($second->runSlice()->done);
+        self::assertTrue($second->isDone());
+        self::assertNotSame($before, (string) file_get_contents($this->dir . '/k.mcr'));
+        self::assertLessThan(strlen($before), strlen((string) file_get_contents($this->dir . '/k.mcr')));
+    }
+
+    public function testTheOutputAndTheArcDumpArePartOfTheKey(): void
+    {
+        $o = $this->options('car', 'm');
+        (new Builder($o))->runSlice();
+        $elsewhere = new Options($o->input, $this->dir . '/elsewhere.mcr', $o->workDir, 'town', 'car', 600.0, builtAt: 1700000000, dumpArcs: $o->dumpArcs);
+        self::assertFalse((new Builder($elsewhere))->isDone());
+        $noDump = new Options($o->input, $o->output, $o->workDir, 'town', 'car', 600.0, builtAt: 1700000000);
+        self::assertFalse((new Builder($noDump))->isDone());
+        self::assertTrue((new Builder($o))->isDone());
+    }
+
+    public function testADoneBuildWhoseFileIsMissingStartsAgain(): void
+    {
+        $o = $this->options('car', 'gone');
+        (new Builder($o))->runSlice();
+        $good = (string) file_get_contents($o->output);
+        unlink($o->output);
+        $b = new Builder($o);
+        self::assertFalse($b->isDone());
+        $r = $b->runSlice();
+        self::assertTrue($r->done);
+        self::assertContains('ways', $r->phases);
+        self::assertSame($good, (string) file_get_contents($o->output));
+    }
+
+    public function testAnAlreadyBuiltFileIsLeftAlone(): void
+    {
+        $o = $this->options('car', 'again');
+        (new Builder($o))->runSlice();
+        $mtime = filemtime($o->output);
+        $r = (new Builder($o))->runSlice();
+        self::assertTrue($r->done);
+        self::assertSame([], $r->phases);
+        self::assertSame($mtime, filemtime($o->output));
+    }
+
+    public function testTwoLaunchesInTheSameWorkDirectoryDoNotOverlap(): void
+    {
+        $o = $this->options('car', 'busy', 0.0, true);
+        mkdir($o->workDir);
+        $held = fopen($o->workDir . '/.lock', 'cb');
+        self::assertIsResource($held);
+        self::assertTrue(flock($held, LOCK_EX | LOCK_NB));
+        try {
+            (new Builder($o))->runSlice();
+            self::fail('a second launch must be refused');
+        } catch (BuilderBusy $e) {
+            self::assertStringContainsString('another build is running', $e->getMessage());
+        }
+        self::assertFileDoesNotExist($o->workDir . '/state.json', 'a refused launch touches nothing');
+        flock($held, LOCK_UN);
+        fclose($held);
+        // the lock is released with the launch, also when it ends in an error
+        $r = (new Builder($o))->runSlice();
+        self::assertFalse($r->done);
+        $other = new Options($o->input, $o->output, $o->workDir, 'town', 'bike', 0.0);
+        try {
+            (new Builder($other))->runSlice();
+        } catch (RuntimeException) {
+        }
+        $again = (new Builder($o))->runSlice();
+        self::assertNotSame('', $again->phase);
+    }
+
+    public function testAStaleContractionStateIsNotReusedAfterTheStateFileIsLost(): void
+    {
+        (new Builder($this->options('car', 'ref')))->runSlice();
+        $o = $this->options('car', 'lost', 0.0, true);
+        do {
+            $r = (new Builder($o))->runSlice();
+        } while ($r->phase !== 'contract');
+        $r = (new Builder($o))->runSlice(); // a first launch inside the contraction: it writes its checkpoint
+        self::assertFileExists($o->workDir . '/contract.state');
+        unlink($o->workDir . '/state.json'); // state lost: a fresh start, whatever else is in the directory
+        do {
+            $r = (new Builder($o))->runSlice();
+        } while (!$r->done);
+        self::assertFileEquals($this->dir . '/ref.mcr', $this->dir . '/lost.mcr');
+    }
+
+    public function testAContractionStateOfAnotherBuildIsRefused(): void
+    {
+        $o = $this->options('car', 'foreign', 0.0, true);
+        do {
+            (new Builder($o))->runSlice();
+        } while (!is_file($o->workDir . '/contract.state'));
+        $state = json_decode((string) file_get_contents($o->workDir . '/state.json'), true);
+        self::assertIsArray($state);
+        $key = $state['key'];
+        $nn = $state['nn'];
+        self::assertIsString($key);
+        self::assertIsInt($nn);
+        $paths = [$o->workDir . '/up.bin', $o->workDir . '/upidx.bin', $o->workDir . '/order.bin'];
+        $c = Contractor::restoreFrom($o->workDir . '/contract.state', $key, $nn, ...$paths);
+        self::assertSame($nn, $c->nodes());
+        try {
+            Contractor::restoreFrom($o->workDir . '/contract.state', 'another key', $nn, ...$paths);
+            self::fail('another key');
+        } catch (RuntimeException $e) {
+            self::assertStringContainsString('belongs to another build', $e->getMessage());
+        }
+        $this->expectException(RuntimeException::class);
+        $this->expectExceptionMessage('for ' . $nn . ' nodes');
+        Contractor::restoreFrom($o->workDir . '/contract.state', $key, $nn + 1, ...$paths);
+    }
+
+    public function testAZoneTheMemoryLimitCannotHoldIsRefusedBeforeTheGraphPhase(): void
+    {
+        $o = $this->options('car', 'small');
+        $tight = new Options($o->input, $o->output, $o->workDir, 'town', 'car', 600.0, builtAt: 1700000000, memoryLimit: 8 << 20);
+        try {
+            (new Builder($tight))->runSlice();
+            self::fail('the preflight must refuse');
+        } catch (RuntimeException $e) {
+            self::assertStringContainsString('the graph phase of this extract', $e->getMessage());
+            self::assertStringContainsString('raise --memory or cut the zone', $e->getMessage());
+        }
+        self::assertFileDoesNotExist($this->dir . '/small.work/arcs.bin', 'nothing of the graph phase ran');
+        // with room it builds
+        $roomy = new Options($o->input, $o->output, $o->workDir, 'town', 'car', 600.0, builtAt: 1700000000, memoryLimit: 256 << 20);
+        self::assertTrue((new Builder($roomy))->runSlice()->done);
     }
 }

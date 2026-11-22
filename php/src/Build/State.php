@@ -21,6 +21,8 @@ final class State
     public int $restrictionsSize = 0;
     public int $ways = 0;
     public int $restrictions = 0;
+    /** Id of the last way kept: ways must come in rising order, also across launches. */
+    public int $lastWayId = -1;
     // phase needed
     public int $needed = 0;
     // phase nodes: offset of the next blob, position in the needed ids, bytes written, whether node blocks were met
@@ -52,6 +54,7 @@ final class State
             'restrictionsSize' => $this->restrictionsSize,
             'ways' => $this->ways,
             'restrictions' => $this->restrictions,
+            'lastWayId' => $this->lastWayId,
             'needed' => $this->needed,
             'nodesOffset' => $this->nodesOffset,
             'neededIndex' => $this->neededIndex,
@@ -75,6 +78,7 @@ final class State
         $s->restrictionsSize = Json::int($a, 'restrictionsSize', 0);
         $s->ways = Json::int($a, 'ways', 0);
         $s->restrictions = Json::int($a, 'restrictions', 0);
+        $s->lastWayId = Json::int($a, 'lastWayId', -1);
         $s->needed = Json::int($a, 'needed', 0);
         $s->nodesOffset = Json::int($a, 'nodesOffset', 0);
         $s->neededIndex = Json::int($a, 'neededIndex', 0);
