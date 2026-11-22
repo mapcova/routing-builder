@@ -10,6 +10,7 @@ pub mod osm;
 pub mod profile;
 pub mod reader;
 pub mod scc;
+pub mod witness;
 
 use ch::Arc;
 use geom::{CELL, Pt, cell_key, simplify, varint, zigzag};
