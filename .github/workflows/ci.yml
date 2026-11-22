@@ -35,3 +35,21 @@ jobs:
           cargo clippy --all-targets --locked -- -D warnings
           cargo build --release --locked
           cargo test --release --locked
+
+  php:
+    name: PHP builder (PHPStan level max, PHPUnit)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install, analyse and test
+        working-directory: php
+        run: |
+          php --version
+          composer install --no-interaction --prefer-dist
+          vendor/bin/phpstan analyse --no-progress --memory-limit=1G
+          vendor/bin/phpunit
