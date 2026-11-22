@@ -490,3 +490,106 @@ fn a_section_outside_the_file_is_an_error_not_a_panic() {
     data[136..144].copy_from_slice(&1000u64.to_le_bytes());
     assert!(mcr::reader::Mcr::from_bytes(data).is_err());
 }
+
+/// A straight two-way street of five junctions (one way per block, so each block is a segment), 72 m between them.
+fn line(profile: Profile) -> OsmData {
+    let mut d = grid(5, 1);
+    for x in 0..4 {
+        way(
+            &mut d,
+            profile,
+            x + 1,
+            &[id(x, 0), id(x + 1, 0)],
+            &[("highway", "residential")],
+        );
+    }
+    d
+}
+
+/// The middle of the segment between junction `x` and `x + 1` of the line.
+fn mid(x: i32) -> (i32, i32) {
+    (LAT0, LON0 + x * 1000 + 500)
+}
+
+#[test]
+fn a_route_by_coordinates_adds_half_the_end_segments_and_whole_ones_between() {
+    for profile in [Profile::Foot, Profile::Bike, Profile::Car] {
+        let b = build(&line(profile), profile);
+        let m = Mcr::from_bytes(b.bytes).unwrap();
+        // one whole segment, from the middle of the first to the middle of the second
+        let one = m.route(mid(0), mid(1)).unwrap();
+        // three segments' worth: half of the first, the two between, half of the last
+        let three = m.route(mid(0), mid(3)).unwrap();
+        let back = m.route(mid(3), mid(0)).unwrap();
+        let seg = m.segment(0);
+        let per_segment = seg.dur[0] as f64;
+        assert!(
+            (one.duration_ds as f64 / per_segment - 1.0).abs() < 0.1,
+            "{profile:?}: {one:?} vs {per_segment}"
+        );
+        assert!(
+            (three.duration_ds as f64 / (3.0 * per_segment) - 1.0).abs() < 0.1,
+            "{profile:?}: {three:?}"
+        );
+        assert!(
+            (back.duration_ds - three.duration_ds).abs() <= 3,
+            "{profile:?}: two-way street, same time back"
+        );
+        assert!(
+            (three.distance_m as f64 / (3.0 * seg.length_m as f64) - 1.0).abs() < 0.05,
+            "{profile:?}: {three:?}"
+        );
+    }
+}
+
+#[test]
+fn two_points_on_one_segment_of_a_node_based_graph_drive_straight() {
+    let b = build(&line(Profile::Foot), Profile::Foot);
+    let m = Mcr::from_bytes(b.bytes).unwrap();
+    let quarter = m.route((LAT0, LON0 + 250), (LAT0, LON0 + 750)).unwrap();
+    let whole = m.segment(0).dur[0] as f64;
+    assert!(
+        (quarter.duration_ds as f64 / (whole / 2.0) - 1.0).abs() < 0.1,
+        "{quarter:?}"
+    );
+}
+
+#[test]
+fn a_point_far_from_every_road_has_no_route() {
+    let b = build(&line(Profile::Car), Profile::Car);
+    let m = Mcr::from_bytes(b.bytes).unwrap();
+    assert!(m.route(mid(0), (LAT0 + 100_000, LON0)).is_none());
+    assert!(m.route((LAT0 + 100_000, LON0), mid(1)).is_none());
+}
+
+#[test]
+fn route_checks_are_stable_valid_and_replayable() {
+    for profile in [Profile::Car, Profile::Foot] {
+        let d = random_city(profile, 11);
+        let b = build(&d, profile);
+        let m = Mcr::from_bytes(b.bytes).unwrap();
+        let w = mcr::witness::witnesses(&m, 20, 1);
+        assert_eq!(w.len(), 20, "{profile:?}");
+        assert_eq!(w, mcr::witness::witnesses(&m, 20, 1), "same file and seed, same checks");
+        assert_ne!(w, mcr::witness::witnesses(&m, 20, 2), "another seed, other checks");
+        for x in &w {
+            assert!(x.duration_ds >= 10);
+            assert_eq!(
+                m.route(x.from, x.to).map(|r| r.duration_ds),
+                Some(x.duration_ds),
+                "replayed on the file"
+            );
+        }
+        let json = mcr::witness::to_json(&w);
+        assert!(json.starts_with("[{\"from\":[") && json.contains("\"duration_ds\":"));
+        assert_eq!(json.matches("\"from\"").count(), 20);
+    }
+}
+
+#[test]
+fn a_graph_with_nowhere_to_go_has_no_route_checks() {
+    let d = grid(1, 1);
+    let b = build(&d, Profile::Car);
+    let m = Mcr::from_bytes(b.bytes).unwrap();
+    assert!(mcr::witness::witnesses(&m, 20, 1).is_empty());
+}

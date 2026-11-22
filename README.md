@@ -8,6 +8,7 @@ Hierarchy) happens here, once per zone and per profile; a route then costs a few
 ```
 mcr build --profile car|car-notoll|bike|foot --zone <id> --input <extract.osm.pbf> --out <file.mcr> [--poly <zone.poly>]
 mcr info <file.mcr>
+mcr witnesses <file.mcr> [--count 20] [--seed 1] [--out routes.json]
 ```
 
 | Profile | Graph | Modelled on | What it knows |
@@ -47,6 +48,29 @@ provider. Without it, the bounding box of the network is the zone.
 Cost (Apple M-series, one core for the hierarchy): Luxembourg 2 s and 0.3 GB, Switzerland with Liechtenstein
 45 s and 3.1 GB. Memory is about 10 bytes per OSM way node plus the graph; a 16 GB runner is enough for countries of
 that size.
+
+## Route checks and publishing
+
+`mcr witnesses` writes **route checks**: twenty pairs of points (1e-6 degree) with the duration, in tenths of a second, that the reference
+reader (`src/reader.rs`, the query of [FORMAT.md](FORMAT.md): snap, labels, bidirectional upward search) finds between them. They are
+stable for a given file and seed. The updates server puts them in the signed manifest of the graph, and an instance that installs the
+file replays them (at least 90 % of the routes within 2 %) before it serves it, falling back to the previous file otherwise.
+
+`tools/publish-graphs.sh <zone> <extract.osm.pbf>` does the whole monthly job for one zone: `mcr build` for each profile, `mcr witnesses`,
+then `bin/updates data:pack-graph` of the [mapcova-updates](https://github.com/mapcova/mapcova-updates) checkout, which cuts the file into
+64 MiB raw-deflate blocks, writes the manifest (`candidate.json`) and pushes it to `https://updates.mapcova.com` with an `mdp_` publisher
+token read from `MAPCOVA_PUBLISHER_TOKEN` (never printed, never an argument). The server re-checks the file (magic, zone and profile of the
+header against the dataset name, the zone against its offers, the ODbL notice, the sections, the route checks, a 10 % shrink limit) and only
+then signs. Datasets are named `<zone>-<profile>` (`ch-li-car`, `fr-car-notoll`) and versioned by the OSM date of the extract. Profiles:
+`car` always, `car-notoll` where the car graph has toll segments, `bike` and `foot` with `PROFILES="car bike foot"`.
+
+```sh
+DRY_RUN=1 PROFILES="car foot" tools/publish-graphs.sh lu lu.osm.pbf     # build, check and pack, no push
+MAPCOVA_PUBLISHER_TOKEN=mdp_... tools/publish-graphs.sh ch-li ch-li.osm.pbf
+```
+
+Build once a month (Geofabrik asks for at most one download per extract and week). The zone must be one of the `zones` of the server's
+`config/offers.json`.
 
 ## Licence of what it produces (ODbL)
 
