@@ -121,6 +121,12 @@ final class TilesBuildTest extends TestCase
         // outside every polygon: the tile with the nearest bounding box
         self::assertSame(1, $ts->ownerOf(49_900_000, 6_400_000));
         self::assertSame(['id' => 'top', 'children' => ['t0', 't1']], ['id' => $ts->root, 'children' => $ts->childrenOf($ts->root)]);
+        // 3 km in cells of 0.002 degree, the longitude count taken at 49.7 N (the tile's northern edge)
+        self::assertSame([14, 21], $ts->marginCells(0, 3000.0));
+        $fine = (array) json_decode((string) file_get_contents($tiling), true);
+        $fine['cell'] = 1000;
+        file_put_contents($tiling, json_encode($fine));
+        self::assertSame([27, 42], TileSet::load($tiling)->marginCells(0, 3000.0));
         $rings = $ts->margin(0, 3, 3);
         self::assertNotEmpty($rings);
         // the extract of a tile holds the roads it owns outside every polygon too (the margin grows from those cells as well)

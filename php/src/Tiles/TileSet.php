@@ -107,6 +107,22 @@ final class TileSet
         return $this->index[$tile] ?? throw new RuntimeException("unknown tile $tile");
     }
 
+    /**
+     * A margin of `$metres` around a tile in cells of the raster: `[lat cells, lon cells]`. The longitude count is taken at
+     * the latitude of the tile farthest from the equator (where a degree of longitude is shortest), so the margin is never
+     * narrower than asked anywhere in the tile.
+     *
+     * @return array{int, int}
+     */
+    public function marginCells(int $tile, float $metres): array
+    {
+        [$a, , $c] = $this->bbox[$tile] ?? throw new RuntimeException("unknown tile index $tile");
+        $lat = min(89.0, max(abs($a), abs($c)) / 1e6);
+        $cellMetres = $this->cell / 1e6 * 111195;
+
+        return [(int) ceil($metres / $cellMetres), (int) ceil($metres / ($cellMetres * cos(deg2rad($lat))))];
+    }
+
     public function has(string $tile): bool
     {
         return isset($this->index[$tile]);

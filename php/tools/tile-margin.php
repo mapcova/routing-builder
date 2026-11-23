@@ -27,9 +27,7 @@ if (count($argv) < 5) {
 $ts = TileSet::load($argv[1]);
 $tile = $ts->index($argv[2]);
 $metres = (float) $argv[3];
-$lat = 50.0;
-$latCells = (int) ceil($metres / (0.002 * 111195));
-$lonCells = (int) ceil($metres / (0.002 * 111195 * cos(deg2rad($lat))));
+[$latCells, $lonCells] = $ts->marginCells($tile, $metres);
 $out = $argv[2] . "\n";
 foreach ($ts->margin($tile, $latCells, $lonCells) as $i => $ring) {
     $area = 0.0;
