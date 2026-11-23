@@ -28,6 +28,8 @@ final class Net
 
     /** @var string latitude and longitude of each node (1e-6 degree), two u32 each: strings, not arrays, to spare memory */
     public string $nodeLL = '';
+    /** @var string OSM id of each node, u64 each (the stable keys of the tile borders are made of them) */
+    public string $nodeOsm = '';
     /** @var string flags of each node (`Profile::NODE_*`), one byte each */
     public string $nflags = '';
     /** @var string node index of each point of the segments (points of a segment are consecutive), u32 each */
@@ -100,6 +102,12 @@ final class Net
         return [Bin::signed32($u['la']), Bin::signed32($u['lo'])];
     }
 
+    /** OSM id of node `$n`. */
+    public function osmId(int $n): int
+    {
+        return Bin::u64($this->nodeOsm, $n * 8);
+    }
+
     public function flags(int $node): int
     {
         return \ord($this->nflags[$node]);
@@ -149,16 +157,19 @@ final class Net
         $count = 0;
         $ll = '';
         $fl = '';
+        $ids = '';
         while (($raw = fread($f, NodesPass::RECORD * 8192)) !== false && $raw !== '') {
             $n = intdiv(\strlen($raw), NodesPass::RECORD);
             for ($i = 0; $i < $n; $i++) {
                 $o = $i * NodesPass::RECORD;
                 $index[Bin::u64($raw, $o)] = $count++;
+                $ids .= substr($raw, $o, 8);
                 $ll .= substr($raw, $o + 8, 8);
                 $fl .= $raw[$o + 16];
             }
         }
         fclose($f);
+        $this->nodeOsm = $ids;
         $this->nodeLL = $ll;
         $this->nflags = $fl;
         $this->nNodes = $count;
@@ -282,7 +293,12 @@ final class Net
         return [(int) $dur, (int) round($dur / max($rate, F32::r(0.01)))];
     }
 
-    public static function build(string $waysPath, string $nodesPath, string $restrictionsPath, Profile $profile): self
+    /**
+     * @param string|null $junctionsPath sorted u64 node ids that are junctions in the whole data set (`tools/junctions.php`): a
+     *        tile's extract may lack the roads that make a node a junction far from the tile; with the list the roads are cut
+     *        at the same nodes in every tile, so that a segment has the same ends, and the same stable key, in each of them
+     */
+    public static function build(string $waysPath, string $nodesPath, string $restrictionsPath, Profile $profile, ?string $junctionsPath = null): self
     {
         $net = new self();
         $index = $net->loadNodes($nodesPath);
@@ -303,6 +319,18 @@ final class Net
                     }
                 }
             }
+        }
+        if ($junctionsPath !== null) {
+            $jf = self::open($junctionsPath);
+            while (($raw = fread($jf, 8 * 65536)) !== false && $raw !== '') {
+                for ($o = 0, $e = \strlen($raw) - 7; $o < $e; $o += 8) {
+                    $i = $index[Bin::u64($raw, $o)] ?? null;
+                    if ($i !== null && \ord($cnt[$i]) < 2) {
+                        $cnt[$i] = "\x02";
+                    }
+                }
+            }
+            fclose($jf);
         }
         $wayIndex = array_flip($wayIds);
         foreach (self::readRestrictions($restrictionsPath) as $r) {

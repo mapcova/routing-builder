@@ -7,7 +7,9 @@ in `src/reader.rs` and the MapCova `local-routing` extension.
 
 **Versioning.** The header carries the format version (`1`). A reader refuses any other value. A change that
 an old reader would misread bumps it; sections may be added at the end of the section table without a bump
-only if old readers can ignore them (none yet).
+only if old readers can ignore them. The two sections of a **tile** (`border`, `core`, [below](#tiles-and-links-format-level-2))
+are such sections: they sit in entries 9 and 10 of the section table, which a reader of the nine sections never looks at,
+and `meta.format_level` is `2`. The version field of a tile stays `1`, so that the readers that exist keep reading it.
 
 **Units.** Coordinates are integers in 1e-6 degree. Weights and durations are tenths of a second, distances
 are metres. All offsets are bytes from the start of the file, all sections start on a 4096-byte boundary.
@@ -127,3 +129,54 @@ arrived through its copy: a reader adds the copies of the target node as targets
    first and last segments clipped at the snapped points.
 5. **Matrix**: many-to-many with buckets (backward searches from each target fill buckets, forward searches from
    each source scan them).
+
+## Tiles and links (format level 2)
+
+A country is cut into **tiles** (administrative areas, one `.mcr` each), and the tiles are tied together by **links**
+(`.mco`) in a tree: a link holds the border of its children (tiles or links) and is itself a child of the link above. A
+route goes up through the levels from each end, across at the lowest link that holds both tiles, and down, and goes on
+upward while the way out of the current group could still be cheaper; the result is exactly the one of a single graph.
+`php/README.md` explains the build, `php/src/Query/Router.php` is the reference reader.
+
+**Which tile owns a road.** The tiling file (`php/tiles/tiles.json`) lists the polygons (Osmosis `.poly`, even-odd rule) and the
+tree of links. A road segment belongs to the tile that owns its *first point* (read from a raster of 0.002 degree cells, filled
+from the polygons; a cell outside every polygon belongs to the tile with the nearest bounding box, measured from the centre of the
+cell). A tile is built from the extract of the cells it owns, polygon and outside cells alike, plus a margin (3 km), so that the turn
+costs, restrictions and junctions next to its border are those of the whole network and every road a tile owns is in its extract;
+the roads of the margin owned by another tile are left out of the graph (their records in `segments` are zeroed: unusable, no node).
+
+**Vertices, cross arcs.** In the edge-based graph a vertex is a directed road segment, so the tiles share no vertex: an arc
+`A -> B` with `A` in one tile and `B` in another is a **cross arc**, computed (the same) from the roads by both tiles. The
+end of a cross arc that lies in the tile is a **border vertex**. During the contraction of a tile its border vertices wait
+(they are *frozen*) while the interior is contracted, down to the K most important interior vertices (the last K in the order of
+the contraction, 1000 by default). Then the arcs among the vertices still there (the **core**: the border and the K interior
+vertices, with the shortest ways between them inside the tile, shortcuts through the contracted interior included) are saved, and
+the border and the K vertices are contracted last, in the order of their priority. The file is therefore a whole hierarchy that a
+version 1 reader can route in, and the **exported** vertices (border and K) are its top: node ids `0 .. exported - 1`.
+Exporting only the border would hand the level above a clique (every entry to every exit, 20 to 100 arcs a vertex); the K
+interior vertices (main roads) carry the long ways, and the export stays sparse (about 5 arcs a vertex).
+
+**Stable key** (28 bytes, big-endian, so the byte order is the numeric order): `u64 from OSM node, u64 to OSM node, u64 way,
+u32 dc` of the directed segment, with `dc = direction | copy << 1`, where `copy` is 0 for the segment and the rank (from 1) of
+the copy made for a via-way restriction among the copies of that segment, ordered by the key of the segment the restricted
+sequence starts from. A vertex keeps its key from one build to the next as long as the road does not change.
+
+### `border` (tile section 9)
+
+`u32 vertices, u32 cross arcs, 8 bytes reserved`; then the exported vertices sorted by key, 36 bytes each (28-byte key, `u32` node
+id in this file, `u32` flags: 1 a cross arc leaves the vertex, 2 one enters it (both: 3), 4 an exported interior vertex);
+then the cross arcs, 52 bytes each, sorted by vertex, kind and key of the other end: `u32 vertex index,
+u32 kind (0 leaves the tile, 1 enters it), 28-byte key of the vertex at the other end, u32 index of the other tile in the tiling,
+u32 weight, u32 duration, u32 distance`. Both ends keep each cross arc (kind 0 in the tile it leaves, kind 1 in the other).
+
+### `core` (tile section 10)
+
+`u32 vertices, u32 arcs, 8 bytes reserved`, `core_hash` (SHA-1, 20 bytes, zero padded to 32), `vertices + 1` `u32` first-arc
+indices, then the arcs, 20 bytes each: `u32 target (index in `border`), weight, duration, distance, middle` (`middle` as in
+`up_fwd`: bit 31 marks an original arc, else the node a shortcut goes over; the halves are found in the records of that node, so a
+core arc unpacks into the roads of the tile). `core_hash` covers the keys of the exported vertices, the core arcs (keys, weight,
+duration, distance) and the cross arcs (kind, keys, weight, duration, distance), never the node ids, the indices or the middles:
+**a tile rebuilt with the same hash needs none of the links above it rebuilt**, and a link that cites the hash is still valid.
+`meta.tile` repeats it as hex (`id`, `index`, `border` vertices, `exported` vertices, `cross_arcs`, `core_arcs`, `core_hash`).
+A rebuilt tile whose exported interior vertices (chosen by the order of the contraction) or the ways between them changed has a new
+hash even if its border did not: a local edit can reach the links above more often than with a border-only export.

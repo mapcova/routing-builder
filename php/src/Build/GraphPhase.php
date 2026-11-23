@@ -13,6 +13,7 @@ use MapCova\GraphBuilder\Net\Scc;
 use MapCova\GraphBuilder\Profile\Profile;
 use MapCova\GraphBuilder\Support\Bin;
 use MapCova\GraphBuilder\Support\Io;
+use MapCova\GraphBuilder\Tiles\TileSet;
 
 /**
  * Phase `graph`: from the way and node files, the network, the graph to contract, and everything of the `.mcr` file that
@@ -25,37 +26,54 @@ use MapCova\GraphBuilder\Support\Io;
 final class GraphPhase
 {
     /** @return array<string,int|string> counts for the log */
-    public static function run(Workdir $w, Profile $profile): array
+    public static function run(Workdir $w, Profile $profile, ?TileSet $tiles = null, int $mine = -1, ?string $junctions = null): array
     {
-        $net = Net::build($w->path('ways.bin'), $w->path('nodes.bin'), $w->path('restrictions.bin'), $profile);
+        $net = Net::build($w->path('ways.bin'), $w->path('nodes.bin'), $w->path('restrictions.bin'), $profile, $junctions);
         $nseg = $net->nseg();
         $log = ['segments' => $nseg, 'junctions' => $net->nj()];
 
         $shadows = [];
         $cid = [];
         $segdir = [];
+        $cut = null;
+        if ($tiles !== null && !$profile->edgeBased()) {
+            throw new \RuntimeException('tiles are built for the edge-based profiles (car, car-notoll) in this version');
+        }
         if ($profile->edgeBased()) {
             $g = EdgeGraph::build($net);
-            $arcs = $g->arcs;
-            $n = \count($g->cnodes);
-            $inScc = Scc::largest($n, $arcs);
-            $segdir = $g->cnodes;
+            $log['graph'] = $g->stats;
+            if ($tiles !== null) {
+                // the extract holds a margin around the tile: keep the tile, and note its border
+                $cut = TileCut::apply($w, $net, $g, $tiles, $mine);
+                $arcs = $cut->arcs;
+                $segdir = $cut->segdir;
+                $cid = $cut->cid;
+                $shadows = $cut->shadows;
+                $n = \count($segdir);
+                $log['tile'] = "{$cut->borderVertices} border vertices, {$cut->crossArcs} cross arcs, {$cut->foreignNodes} nodes of the margin left out";
+                // the main network of the tile, the roads outside it taken as one connected whole (see `Scc::largest`)
+                $inScc = Scc::largest($n, $arcs, $cut->exits, $cut->entries);
+            } else {
+                $arcs = $g->arcs;
+                $n = \count($g->cnodes);
+                $inScc = Scc::largest($n, $arcs);
+                $segdir = $g->cnodes;
+                $shadows = $g->shadows;
+                $cid = $g->cid;
+            }
             // a segment whose own node cannot be entered any more (every way in goes through a copy made for a
             // via-way restriction) is on the main network when one of its copies is
             $reachable = $inScc;
-            foreach ($g->shadows as [$orig, $copy]) {
+            foreach ($shadows as [$orig, $copy]) {
                 if ($inScc[$copy]) {
                     $reachable[$orig] = true;
                 }
             }
             $snapDirs = [];
             for ($d = 0; $d < $nseg * 2; $d++) {
-                $c = $g->cid[$d];
+                $c = $cid[$d];
                 $snapDirs[] = $c !== Net::NONE && $reachable[$c];
             }
-            $shadows = $g->shadows;
-            $cid = $g->cid;
-            $log['graph'] = $g->stats;
         } else {
             $arcs = NodeGraph::build($net, $profile);
             $n = $net->nj();
@@ -89,6 +107,11 @@ final class GraphPhase
         $snappable = [];
         $edgeBased = $profile->edgeBased();
         for ($s = 0; $s < $nseg; $s++) {
+            if ($cut !== null && !$cut->owned[$s]) {
+                // a road of the margin, owned by another tile: kept so that segment numbers do not move, but unusable
+                $segBuf .= pack('V10', \strlen($geom), 0, 0, 0, 0, 0, Net::NONE, Net::NONE, 0, 0);
+                continue;
+            }
             $off = \strlen($geom);
             $pla = 0;
             $plo = 0;

@@ -20,6 +20,8 @@ final class EdgeGraph
     public Arcs $arcs;
     /** @var list<array{int,int}> (original node, shadow node): the shadow stands for "arrived through the restricted sequence" */
     public array $shadows = [];
+    /** @var array<int,int> copy node -> the directed segment the restricted sequence starts from (the `from` side of the restriction) */
+    public array $copyFrom = [];
     /** @var array<int,int> directed segment -> graph node, `NONE` when not allowed */
     public array $cid = [];
     public string $stats = '';
@@ -284,6 +286,7 @@ final class EdgeGraph
                     $sh[$i] = $base + $i;
                     $cnodes[] = $c['chain'][$i];
                     $shadows[] = [$id, $base + $i];
+                    $g->copyFrom[$base + $i] = $c['a'];
                 }
                 // A -> first copy
                 foreach ($redirected as [$rs, $rd, $rw, $rt, $rdist, $rsd]) {

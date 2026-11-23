@@ -20,7 +20,8 @@ function usage(): never
     fwrite(STDERR, <<<'TXT'
 usage: php bin/build.php --tile <zone> --profile car|car-notoll|bike|foot --input <extract.osm.pbf> --out <file.mcr>
                          [--slice 240] [--memory 256M] [--work <dir>] [--poly <zone.poly>] [--built-at <unix time>]
-                         [--dump-arcs <file>] [--keep-work]
+                         [--dump-arcs <file>] [--keep-work] [--tiles <tiles.json>] [--junctions <junctions.bin>]
+                         [--export-interior 1000]
 
 TXT);
     exit(2);
@@ -38,7 +39,7 @@ function bytes(string $v): int
     return (int) $m[1] * $mult;
 }
 
-$opts = getopt('', ['tile:', 'profile:', 'input:', 'out:', 'slice:', 'memory:', 'work:', 'poly:', 'built-at:', 'dump-arcs:', 'keep-work']);
+$opts = getopt('', ['tile:', 'profile:', 'input:', 'out:', 'slice:', 'memory:', 'work:', 'poly:', 'built-at:', 'dump-arcs:', 'keep-work', 'tiles:', 'junctions:', 'export-interior:']);
 if (!is_array($opts)) {
     usage();
 }
@@ -65,6 +66,9 @@ $options = new Options(
     dumpArcs: $str('dump-arcs'),
     keepWork: isset($opts['keep-work']),
     memoryLimit: $memory !== null ? bytes($memory) : 0,
+    tiles: $str('tiles'),
+    junctions: $str('junctions'),
+    exportInterior: (int) ($str('export-interior') ?? 1000),
 );
 
 try {

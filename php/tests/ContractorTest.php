@@ -49,7 +49,7 @@ final class ContractorTest extends TestCase
     }
 
     /** @return array{Contractor,int} the contractor and the number of launches it took */
-    private function contract(string $arcs, string $tag, float $slice): array
+    private function contract(string $arcs, string $tag, float $slice, ?string $frozen = null, bool $release = true, int $remainder = 0): array
     {
         $paths = [$this->dir . "/$tag.up", $this->dir . "/$tag.idx", $this->dir . "/$tag.ord"];
         $n = (int) (strlen((string) file_get_contents($arcs)) / 24);
@@ -60,6 +60,10 @@ final class ContractorTest extends TestCase
         }
         self::assertGreaterThan(0, $n);
         $c = Contractor::fromArcs($nodes, $arcs, true, ...$paths);
+        $c->setCorePath($this->dir . "/$tag.core");
+        if ($frozen !== null || $remainder > 0) {
+            $c->setFreeze($frozen ?? '', $release, $remainder);
+        }
         $launches = 0;
         while (true) {
             ++$launches;
@@ -70,6 +74,7 @@ final class ContractorTest extends TestCase
             // what a new process would do: save, drop everything, restore
             $c->checkpointTo($this->dir . '/chk.state', 'key');
             $c = Contractor::restoreFrom($this->dir . '/chk.state', 'key', $nodes, ...$paths);
+            $c->setCorePath($this->dir . "/$tag.core");
             self::assertLessThan(100000, $launches);
         }
 
@@ -124,6 +129,178 @@ final class ContractorTest extends TestCase
         }
 
         return $best;
+    }
+
+    /** @return array<int,list<array{int,int}>> the arcs of a core file by node: target, weight */
+    private function coreArcs(string $file): array
+    {
+        $raw = (string) file_get_contents($file);
+        $out = [];
+        for ($o = 0, $e = strlen($raw); $o < $e;) {
+            [$x, $n] = Bin::u32s($raw, 2, $o);
+            $o += 8;
+            $out[$x] = [];
+            for ($k = 0; $k < $n; $k++, $o += 20) {
+                [$to, $w] = Bin::u32s($raw, 2, $o);
+                $out[$x][] = [$to, $w];
+            }
+        }
+
+        return $out;
+    }
+
+    public function testFrozenNodesKeepTheirDistancesInTheCoreAndAreContractedLast(): void
+    {
+        $arcs = $this->graph(80, 200, 9);
+        $frozen = '';
+        for ($i = 0; $i < 80; $i++) {
+            $frozen .= $i % 6 === 0 ? "\1" : "\0";
+        }
+        $ref = new Dijkstra($arcs);
+        // with release: the whole hierarchy is exact, the frozen nodes are the last ones
+        [$c, $launches] = $this->contract($arcs, 'f', 0.0, $frozen);
+        self::assertSame(80, $c->rank());
+        self::assertGreaterThan(5, $launches);
+        $order = Bin::allU32((string) file_get_contents($this->dir . '/f.ord'));
+        $last = array_slice($order, -14);
+        sort($last);
+        $expected = [];
+        for ($i = 0; $i < 80; $i += 6) {
+            $expected[] = $i;
+        }
+        self::assertSame($expected, $last, 'the frozen nodes come last');
+        $fwd = $this->upArcs('f', true);
+        $bwd = $this->upArcs('f', false);
+        for ($from = 0; $from < 80; $from += 4) {
+            $f = $this->search($fwd, $from);
+            for ($to = 1; $to < 80; $to += 3) {
+                $b = $this->search($bwd, $to);
+                $best = null;
+                foreach ($b as $v => $lb) {
+                    if (isset($f[$v]) && ($best === null || $f[$v][0] + $lb[0] < $best)) {
+                        $best = $f[$v][0] + $lb[0];
+                    }
+                }
+                self::assertSame($ref->weight($from, $to), $best, "$from -> $to");
+            }
+        }
+        // the core (taken when the others were done) keeps the distances among the frozen nodes
+        $core = $this->coreArcs($this->dir . '/f.core');
+        self::assertSame($expected, array_keys($core));
+        foreach ($expected as $a) {
+            $dist = [$a => 0];
+            $h = new IntMinHeap();
+            $h->insert($a);
+            $closed = [];
+            while (!$h->isEmpty()) {
+                $k = $h->extract();
+                $u = $k & 0xFFFFFF;
+                if (isset($closed[$u])) {
+                    continue;
+                }
+                $closed[$u] = true;
+                foreach ($core[$u] ?? [] as [$v, $w]) {
+                    self::assertContains($v, $expected, 'a core arc joins frozen nodes');
+                    if (!isset($dist[$v]) || $dist[$u] + $w < $dist[$v]) {
+                        $dist[$v] = $dist[$u] + $w;
+                        $h->insert(($dist[$v] << 24) | $v);
+                    }
+                }
+            }
+            foreach ($expected as $b) {
+                self::assertSame($ref->weight($a, $b), $dist[$b] ?? null, "core $a -> $b");
+            }
+        }
+        // the same, in one launch: byte for byte
+        $this->contract($arcs, 'g', 600.0, $frozen);
+        self::assertFileEquals($this->dir . '/f.up', $this->dir . '/g.up');
+        self::assertFileEquals($this->dir . '/f.core', $this->dir . '/g.core');
+    }
+
+    public function testFrozenNodesThatAreNeverReleasedAndARemainderStayUncontracted(): void
+    {
+        $arcs = $this->graph(80, 200, 4);
+        $frozen = '';
+        for ($i = 0; $i < 80; $i++) {
+            $frozen .= $i % 10 === 0 ? "\1" : "\0";
+        }
+        [$c] = $this->contract($arcs, 'h', 0.0, $frozen, false, 12);
+        self::assertSame(80 - 8 - 12, $c->rank(), 'the frozen nodes and the remainder are left');
+        $core = $this->coreArcs($this->dir . '/h.core');
+        self::assertCount(20, $core);
+        foreach (range(0, 70, 10) as $i) {
+            self::assertArrayHasKey($i, $core);
+        }
+    }
+
+    public function testTheSnapshotAtKInteriorNodesIsTakenWhenReleasingToo(): void
+    {
+        $arcs = $this->graph(80, 200, 11);
+        $frozen = '';
+        for ($i = 0; $i < 80; $i++) {
+            $frozen .= $i % 6 === 0 ? "\1" : "\0";
+        }
+        $ref = new Dijkstra($arcs);
+        // 14 frozen nodes, 66 interior ones, 10 of them left when the snapshot is taken; then everything is contracted
+        [$c, $launches] = $this->contract($arcs, 'k', 0.0, $frozen, true, 10);
+        self::assertSame(80, $c->rank());
+        self::assertGreaterThan(5, $launches);
+        $core = $this->coreArcs($this->dir . '/k.core');
+        self::assertCount(14 + 10, $core, 'the frozen nodes and the 10 interior nodes that are left are in the snapshot');
+        $order = Bin::allU32((string) file_get_contents($this->dir . '/k.ord'));
+        $last = array_slice($order, -24);
+        sort($last);
+        $keys = array_keys($core);
+        sort($keys);
+        self::assertSame($keys, $last, 'the nodes of the snapshot are the last ones contracted');
+        for ($i = 0; $i < 80; $i += 6) {
+            self::assertContains($i, $keys);
+        }
+        // the snapshot arcs are the exact distances among its nodes (through the interior that is already contracted)
+        foreach ($keys as $a) {
+            $dist = [$a => 0];
+            $h = new IntMinHeap();
+            $h->insert($a);
+            $closed = [];
+            while (!$h->isEmpty()) {
+                $k = $h->extract();
+                $u = $k & 0xFFFFFF;
+                if (isset($closed[$u])) {
+                    continue;
+                }
+                $closed[$u] = true;
+                foreach ($core[$u] ?? [] as [$v, $w]) {
+                    self::assertContains($v, $keys);
+                    if (!isset($dist[$v]) || $dist[$u] + $w < $dist[$v]) {
+                        $dist[$v] = $dist[$u] + $w;
+                        $h->insert(($dist[$v] << 24) | $v);
+                    }
+                }
+            }
+            foreach ($keys as $b) {
+                self::assertSame($ref->weight($a, $b), $dist[$b] ?? null, "core $a -> $b");
+            }
+        }
+        // the hierarchy is exact
+        $fwd = $this->upArcs('k', true);
+        $bwd = $this->upArcs('k', false);
+        for ($from = 0; $from < 80; $from += 4) {
+            $f = $this->search($fwd, $from);
+            for ($to = 1; $to < 80; $to += 3) {
+                $b = $this->search($bwd, $to);
+                $best = null;
+                foreach ($b as $v => $lb) {
+                    if (isset($f[$v]) && ($best === null || $f[$v][0] + $lb[0] < $best)) {
+                        $best = $f[$v][0] + $lb[0];
+                    }
+                }
+                self::assertSame($ref->weight($from, $to), $best, "$from -> $to");
+            }
+        }
+        // in one launch: byte for byte
+        $this->contract($arcs, 'k1', 600.0, $frozen, true, 10);
+        self::assertFileEquals($this->dir . '/k.up', $this->dir . '/k1.up');
+        self::assertFileEquals($this->dir . '/k.core', $this->dir . '/k1.core');
     }
 
     public function testHierarchyGivesTheShortestDistancesAndCarriesDurationAndDistance(): void

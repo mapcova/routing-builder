@@ -13,6 +13,7 @@ use MapCova\GraphBuilder\Pbf\PbfReader;
 use MapCova\GraphBuilder\Profile\Profile;
 use MapCova\GraphBuilder\Support\Bin;
 use MapCova\GraphBuilder\Support\Io;
+use MapCova\GraphBuilder\Tiles\TileSet;
 use RuntimeException;
 
 /**
@@ -31,7 +32,7 @@ final class Builder
      * Part of the build key: raise it whenever a change of the code makes a work directory of the previous version
      * useless (another file format, another checkpoint).
      */
-    private const CODE_VERSION = 2;
+    public const CODE_VERSION = 5;
     /**
      * Bytes per kept node the `graph` phase needs at its peak, for the edge-based graph (car: 103 MB for 323,000 kept
      * nodes) and the node-based one (bike: 150 MB for 917,000), measured on Luxembourg, plus about 20 % of margin.
@@ -50,6 +51,7 @@ final class Builder
     private Workdir $w;
     private Profile $profile;
     private State $state;
+    private ?TileSet $tileSet = null;
     /** @var callable(string):void */
     private $log;
 
@@ -64,6 +66,15 @@ final class Builder
             throw new RuntimeException('the zone identifier is lower case letters, digits and dashes');
         }
         $this->profile = $p;
+        if ($o->tiles !== null) {
+            if (!$p->edgeBased()) {
+                throw new RuntimeException('tiles are built for car and car-notoll');
+            }
+            $this->tileSet = TileSet::load($o->tiles);
+            if (!$this->tileSet->has($o->zone)) {
+                throw new RuntimeException("the tiling {$o->tiles} has no tile {$o->zone}");
+            }
+        }
         $this->w = new Workdir($o->workDir);
         $this->state = new State();
         $this->log = $log ?? static function (string $m): void {
@@ -81,12 +92,31 @@ final class Builder
         $poly = $this->o->poly !== null && is_file($this->o->poly) ? md5_file($this->o->poly) : '';
 
         $dump = $this->o->dumpArcs !== null ? self::absolute($this->o->dumpArcs) : '';
+        $tiles = $this->o->tiles !== null ? $this->tilingHash($this->o->tiles) : '';
+        $junctions = $this->o->junctions !== null && is_file($this->o->junctions) ? filesize($this->o->junctions) . ':' . filemtime($this->o->junctions) : '';
 
-        return sha1(implode('|', [self::CODE_VERSION, realpath($in) ?: $in, (string) filesize($in), (string) filemtime($in), $this->o->profile, $this->o->zone, (string) $poly, self::absolute($this->o->output), $dump]));
+        return sha1(implode('|', [self::CODE_VERSION, realpath($in) ?: $in, (string) filesize($in), (string) filemtime($in), $this->o->profile, $this->o->zone, (string) $poly, self::absolute($this->o->output), $dump, $tiles, $junctions, $this->tileSet !== null ? (string) $this->o->exportInterior : '']));
+    }
+
+    /** Fingerprint of a tiling file and of the polygons it names: another tiling, another build. */
+    private function tilingHash(string $file): string
+    {
+        $h = hash_init('sha1');
+        hash_update($h, (string) @file_get_contents($file));
+        $j = json_decode((string) @file_get_contents($file), true);
+        if (\is_array($j) && isset($j['tiles']) && \is_array($j['tiles'])) {
+            foreach ($j['tiles'] as $poly) {
+                if (\is_string($poly)) {
+                    hash_update($h, (string) @file_get_contents(\dirname($file) . '/' . $poly));
+                }
+            }
+        }
+
+        return hash_final($h);
     }
 
     /** The path with its directory resolved, so that the same file has the same key whatever the working directory. */
-    private static function absolute(string $path): string
+    public static function absolute(string $path): string
     {
         $dir = realpath(\dirname($path));
 
@@ -358,7 +388,7 @@ final class Builder
     {
         $nodes = intdiv($this->state->nodesSize, NodesPass::RECORD);
         $this->preflight('graph', self::GRAPH_BASE_BYTES + ($this->profile->edgeBased() ? self::GRAPH_BYTES_PER_NODE_EDGE : self::GRAPH_BYTES_PER_NODE_NODE) * $nodes, "$nodes kept nodes");
-        $log = GraphPhase::run($this->w, $this->profile);
+        $log = GraphPhase::run($this->w, $this->profile, $this->tileSet, $this->tileSet?->index($this->o->zone) ?? -1, $this->o->junctions);
         foreach ($log as $k => $v) {
             $this->say("graph: $k = $v");
         }
@@ -400,6 +430,12 @@ final class Builder
             $this->preflight('contract', self::GRAPH_BASE_BYTES + self::CONTRACT_BYTES_PER_NODE * $s->nn + self::SORT_BYTES_PER_ARC * $arcs, "{$s->nn} graph nodes, $arcs arcs");
             $ch = Contractor::fromArcs($s->nn, $this->w->path('arcs.bin'), $this->profile->edgeBased(), ...$paths);
         }
+        if ($this->tileSet !== null) {
+            if (!$this->w->has('contract.state')) {
+                $ch->setFreeze(substr((string) file_get_contents($this->w->path('frozen.bin')), 0, $s->nn), true, $this->o->exportInterior);
+            }
+            $ch->setCorePath($this->w->path('core.bin'));
+        }
         $ch->setMemoryLimit($this->memoryLimit());
         $finished = $ch->run($deadline);
         $s->rank = $ch->rank();
@@ -425,7 +461,7 @@ final class Builder
             $polygon = Poly::parse($text);
         }
         $builtAt = $this->o->builtAt ?? time();
-        $r = FinishPhase::run($this->w, $this->profile, $this->o->zone, $this->state->nn, $this->state->osmTimestamp, $builtAt, $polygon, $this->o->output);
+        $r = FinishPhase::run($this->w, $this->profile, $this->o->zone, $this->state->nn, $this->state->osmTimestamp, $builtAt, $polygon, $this->o->output, $this->tileSet, $this->tileSet?->index($this->o->zone) ?? -1);
         $this->say('wrote ' . $this->o->output . ' (' . $r['bytes'] . ' bytes, ' . $r['nodes'] . ' nodes)');
 
         return true;

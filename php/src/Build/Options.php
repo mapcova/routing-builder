@@ -25,6 +25,12 @@ final class Options
         public readonly bool $keepWork = false,
         /** Memory limit in bytes the build is sized for (0 = the PHP limit); reported against, not enforced. */
         public readonly int $memoryLimit = 0,
+        /** Tiling file (`tiles.json`): the input is then the extract of the tile `zone` with a margin, and the file a tile. */
+        public readonly ?string $tiles = null,
+        /** Node ids that are junctions in the whole data set (`tools/junctions.php`), for a tile built from a partial extract. */
+        public readonly ?string $junctions = null,
+        /** Interior nodes a tile exports besides its border vertices: the K most important ones in the contraction order. */
+        public readonly int $exportInterior = 1000,
     ) {
     }
 }

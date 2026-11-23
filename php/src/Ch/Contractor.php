@@ -30,7 +30,7 @@ final class Contractor
     private const NODE_BITS = 25;
     private const NODE_MASK = (1 << self::NODE_BITS) - 1;
     private const BUFFER = 1 << 20;
-    private const CHECKPOINT_MAGIC = 'MCRCHK03';
+    private const CHECKPOINT_MAGIC = 'MCRCHK05';
     private const CHECKPOINT_END = 'MCRCHEND';
     /** Share of the memory limit above which `run()` stops early, to checkpoint while there is room to do it. */
     public const MEMORY_SHARE = 0.4;
@@ -60,6 +60,21 @@ final class Contractor
     private int $start = -1;
     private int $avoid = -1;
     private int $nSettled = 0;
+
+    /** Nodes that wait (one byte each, 1 = frozen) until the interior is contracted; '' = none. */
+    private string $frozen = '';
+    /** Whether the frozen nodes are contracted too, once the snapshot is taken (a tile), or stay for good (a link). */
+    private bool $release = false;
+    /**
+     * Interior nodes (not frozen) that are still there when the snapshot is taken: the most important ones in the order of
+     * the contraction. A tile or a link exports them with its frozen nodes; the top link has no frozen node, and its rest is
+     * searched by Dijkstra.
+     */
+    private int $remainder = 0;
+    private bool $snapshotted = false;
+    /** Next node to release (frozen nodes are released in node order, so a resumed run does the same). */
+    private int $relNext = 0;
+    private string $corePath = '';
 
     private int $memoryCap = 0;
     private int $minSteps = 1000;
@@ -155,6 +170,71 @@ final class Contractor
         $this->memoryCap = $limit > 0 ? (int) ($limit * self::MEMORY_SHARE) : 0;
         $this->minSteps = $minSteps;
         $this->memoryGrowth = $growth ?? (int) ($limit * 0.05);
+    }
+
+    /**
+     * Freezes nodes: they are not contracted with the others. When all the others but `$remainder` are contracted, the arcs
+     * among the nodes still there (the frozen ones and the remainder) are saved to the core file (node, arc count, then per arc
+     * destination, weight, duration, distance, middle: five u32), and then, with `$release`, the frozen nodes and the remainder are
+     * contracted too (a tile: the file stays a whole hierarchy); without it they stay uncontracted (a link).
+     *
+     * @param string $frozen one byte per node, "\1" = frozen
+     */
+    public function setFreeze(string $frozen, bool $release, int $remainder): void
+    {
+        $this->frozen = strpos($frozen, "\1") === false ? '' : $frozen;
+        $this->release = $release;
+        $this->remainder = $remainder;
+    }
+
+    /** @return array{int,int,int} the settled-node limits of the witness searches: at the start, of a neighbour, of a contraction */
+    private function limits(): array
+    {
+        return [$this->initialSettled, $this->neighbourSettled, $this->contractionSettled];
+    }
+
+    public function setCorePath(string $path): void
+    {
+        $this->corePath = $path;
+    }
+
+    /** Number of nodes contracted when the snapshot is taken: all but the frozen ones and the remainder. */
+    private function stopRank(): int
+    {
+        if ($this->frozen === '' && $this->remainder === 0) {
+            return $this->n;
+        }
+
+        return max(0, $this->n - substr_count($this->frozen, "\1") - $this->remainder);
+    }
+
+    private function needsSnapshot(): bool
+    {
+        return $this->frozen !== '' || $this->remainder > 0;
+    }
+
+    /** True when node `$x` takes part in the contraction now: not frozen, or released. */
+    private function active(int $x): bool
+    {
+        return $this->frozen === '' || $this->frozen[$x] === "\0" || ($this->release && $this->snapshotted && $x < $this->relNext);
+    }
+
+    /** Writes the arcs among the nodes still there (what the interior contraction made of the frozen nodes). */
+    private function snapshot(): void
+    {
+        $buf = '';
+        for ($x = 0; $x < $this->n; $x++) {
+            if ($this->alive[$x] !== "\1") {
+                continue;
+            }
+            $o = Bin::allU32($this->out[$x]);
+            $t = Bin::allU32($this->td[$x]);
+            $buf .= pack('VV', $x, intdiv(\count($o), 3));
+            for ($j = 0, $m = \count($o), $r = 0; $j < $m; $j += 3, $r += 2) {
+                $buf .= pack('VVVVV', $o[$j], $o[$j + 1], $t[$r], $t[$r + 1], $o[$j + 2]);
+            }
+        }
+        Io::putAtomic($this->corePath, $buf);
     }
 
     /** @return int number of contracted nodes so far */
@@ -365,7 +445,7 @@ final class Contractor
     {
         $this->queue = new IntMinHeap();
         for ($x = 0; $x < $this->initNext; $x++) {
-            if ($this->alive[$x] === "\1") {
+            if ($this->alive[$x] === "\1" && $this->active($x)) {
                 $this->queue->insert(($this->prio[$x] << self::NODE_BITS) | $x);
             }
         }
@@ -383,10 +463,12 @@ final class Contractor
             // each step is done before the clock is read: a call always makes progress, whatever its deadline
             while ($this->initNext < $this->n) {
                 $x = $this->initNext;
-                $p = $this->relevance($x, 0, $this->initialSettled);
+                $p = $this->relevance($x, 0, $this->limits()[0]);
                 $this->prio[$x] = $p;
-                $this->queue->insert(($p << self::NODE_BITS) | $x);
                 ++$this->initNext;
+                if ($this->active($x)) {
+                    $this->queue->insert(($p << self::NODE_BITS) | $x);
+                }
                 if (hrtime(true) > $deadline) {
                     return false;
                 }
@@ -394,20 +476,45 @@ final class Contractor
             $q = $this->queue;
             $steps = 0;
             $startUsage = memory_get_usage();
-            while (!$q->isEmpty()) {
-                $k = $q->extract();
-                $x = $k & self::NODE_MASK;
-                if ($this->alive[$x] === "\0" || ($k >> self::NODE_BITS) !== $this->prio[$x]) {
-                    continue;
+            while (true) {
+                $target = $this->snapshotted || !$this->needsSnapshot() ? $this->n : $this->stopRank();
+                // a run resumed in the middle of the release goes on releasing before it contracts anything
+                $releasing = $this->snapshotted && $this->release && $this->relNext < $this->n;
+                while (!$releasing && $this->rank < $target && !$q->isEmpty()) {
+                    $k = $q->extract();
+                    $x = $k & self::NODE_MASK;
+                    if ($this->alive[$x] === "\0" || ($k >> self::NODE_BITS) !== $this->prio[$x]) {
+                        continue;
+                    }
+                    $this->contract($x);
+                    ++$steps;
+                    if (hrtime(true) > $deadline || ($this->memoryCap > 0 && $steps >= $this->minSteps && ($steps & 63) === 0 && $this->memoryAlarm($startUsage))) {
+                        return $this->finished();
+                    }
                 }
-                $this->contract($x);
-                ++$steps;
-                if (hrtime(true) > $deadline || ($this->memoryCap > 0 && $steps >= $this->minSteps && ($steps & 63) === 0 && $this->memoryAlarm($startUsage))) {
-                    return $q->isEmpty() && $this->rank >= $this->n;
+                if (!$this->snapshotted && $this->needsSnapshot()) {
+                    $this->snapshot();
+                    $this->snapshotted = true;
+                    if (!$this->release) {
+                        return true;
+                    }
+                }
+                while ($this->relNext < $this->n) {
+                    $x = $this->relNext;
+                    if ($this->frozen !== '' && $this->frozen[$x] === "\1" && $this->alive[$x] === "\1") {
+                        $p = $this->relevance($x, $this->level[$x], $this->limits()[1]);
+                        $this->prio[$x] = $p;
+                        $this->queue->insert(($p << self::NODE_BITS) | $x);
+                    }
+                    ++$this->relNext;
+                    if (hrtime(true) > $deadline) {
+                        return $this->finished();
+                    }
+                }
+                if ($this->rank >= $this->n || $q->isEmpty()) {
+                    return true;
                 }
             }
-
-            return true;
         } finally {
             try {
                 $this->flush();
@@ -422,6 +529,21 @@ final class Contractor
         }
     }
 
+    /** Whether the contraction has nothing left to do (checked when a call stops at its deadline). */
+    private function finished(): bool
+    {
+        if ($this->needsSnapshot()) {
+            if (!$this->snapshotted) {
+                return false;
+            }
+            if (!$this->release) {
+                return true;
+            }
+        }
+
+        return $this->rank >= $this->n;
+    }
+
     /** True when the memory in use is over its cap and has grown since `$startUsage` by more than the allowed growth. */
     private function memoryAlarm(int $startUsage): bool
     {
@@ -434,7 +556,7 @@ final class Contractor
     {
         $this->alive[$x] = "\0";
         ++$this->rank;
-        $this->shortcutsOf($x, $this->contractionSettled, true);
+        $this->shortcutsOf($x, $this->limits()[2], true);
         $ob = $this->out[$x];
         $ib = $this->in[$x];
         $tdx = $this->td[$x];
@@ -484,7 +606,10 @@ final class Contractor
             if ($this->level[$y] < $lx + 1) {
                 $this->level[$y] = $lx + 1;
             }
-            $p = $this->relevance($y, $this->level[$y], $this->neighbourSettled);
+            if (!$this->active($y)) {
+                continue;
+            }
+            $p = $this->relevance($y, $this->level[$y], $this->limits()[1]);
             $this->prio[$y] = $p;
             $this->queue->insert(($p << self::NODE_BITS) | $y);
         }
@@ -497,7 +622,8 @@ final class Contractor
      * not a second copy of the state, and a killed process leaves the previous checkpoint whole.
      *
      * Layout: magic, build key (u32 length, bytes), seven u64 (n, rank, initNext, shortcuts, upSize, idxSize, ordSize),
-     * `alive` (n bytes), `prio` and `level` (n u64 each), then `out`, `in` and `td` (per node a u32 length and the
+     * four u64 (snapshot taken, next node to release, release, remainder), the frozen flags (u32 length, bytes: empty
+     * when nothing is frozen), `alive` (n bytes), `prio` and `level` (n u64 each), then `out`, `in` and `td` (per node a u32 length and the
      * bytes), the end mark.
      */
     public function checkpointTo(string $path, string $key): void
@@ -510,7 +636,9 @@ final class Contractor
         try {
             $written = 0;
             $buf = self::CHECKPOINT_MAGIC . pack('V', \strlen($key)) . $key
-                . pack('P7', $this->n, $this->rank, $this->initNext, $this->shortcuts, $this->upSize, $this->idxSize, $this->ordSize);
+                . pack('P7', $this->n, $this->rank, $this->initNext, $this->shortcuts, $this->upSize, $this->idxSize, $this->ordSize)
+                . pack('P4', $this->snapshotted ? 1 : 0, $this->relNext, $this->release ? 1 : 0, $this->remainder)
+                . pack('V', \strlen($this->frozen)) . $this->frozen;
             $put = static function () use ($f, $tmp, &$buf, &$written): void {
                 Io::write($f, $buf, $tmp);
                 $written += \strlen($buf);
@@ -578,7 +706,15 @@ final class Contractor
         if ($n !== $nodes) {
             throw new RuntimeException("$path is for $n nodes, the graph has $nodes: remove the work directory");
         }
+        [$snapshotted, $relNext, $release, $remainder] = Bin::list('P4', $r->take(32));
+        $fl = Bin::u32($r->take(4));
+        $frozen = $fl > 0 ? $r->take($fl) : '';
         $c = new self($n, $upPath, $idxPath, $ordPath);
+        $c->snapshotted = $snapshotted === 1;
+        $c->relNext = $relNext;
+        $c->release = $release === 1;
+        $c->remainder = $remainder;
+        $c->frozen = $frozen;
         $c->rank = $rank;
         $c->initNext = $initNext;
         $c->shortcuts = $shortcuts;
