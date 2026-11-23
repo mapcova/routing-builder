@@ -11,10 +11,20 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+/* stops with a message when an allocation fails (the graphs are large) */
+static void *ck(void *p)
+{
+    if (!p) {
+        fprintf(stderr, "merged-dijkstra: out of memory\n");
+        exit(3);
+    }
+    return p;
+}
+
 typedef struct { int64_t k; uint32_t v; } E;
 static E *heap; static size_t hn, hcap;
 static void push(int64_t k, uint32_t v) {
-    if (hn == hcap) { hcap = hcap ? hcap * 2 : 1 << 20; heap = realloc(heap, hcap * sizeof(E)); if (!heap) exit(3); }
+    if (hn == hcap) { hcap = hcap ? hcap * 2 : 1 << 20; heap = realloc(heap, hcap * sizeof(E)); if (!heap) { fprintf(stderr, "merged-dijkstra: out of memory\n"); exit(3); } }
     size_t i = hn++;
     while (i > 0) { size_t p = (i - 1) / 2; if (heap[p].k <= k) break; heap[i] = heap[p]; i = p; }
     heap[i].k = k; heap[i].v = v;
@@ -39,24 +49,24 @@ int main(int argc, char **argv) {
     FILE *g = fopen(argv[1], "rb"), *q = fopen(argv[2], "rb"), *o = fopen(argv[3], "wb");
     if (!g || !q || !o) { fprintf(stderr, "cannot open files\n"); return 2; }
     uint32_t n, m; rd(&n, 4, g); rd(&m, 4, g);
-    uint32_t *raw = malloc((size_t)m * 12); rd(raw, (size_t)m * 12, g);
-    uint32_t *first = calloc((size_t)n + 2, 4), *to = malloc((size_t)m * 4), *wt = malloc((size_t)m * 4);
+    uint32_t *raw = ck(malloc((size_t)m * 12)); rd(raw, (size_t)m * 12, g);
+    uint32_t *first = ck(calloc((size_t)n + 2, 4)), *to = ck(malloc((size_t)m * 4)), *wt = ck(malloc((size_t)m * 4));
     for (uint32_t i = 0; i < m; i++) first[raw[i * 3] + 1]++;
     for (uint32_t i = 0; i < n; i++) first[i + 1] += first[i];
-    uint32_t *fill = malloc((size_t)n * 4); for (uint32_t i = 0; i < n; i++) fill[i] = first[i];
+    uint32_t *fill = ck(malloc((size_t)n * 4)); for (uint32_t i = 0; i < n; i++) fill[i] = first[i];
     for (uint32_t i = 0; i < m; i++) { uint32_t p = fill[raw[i * 3]]++; to[p] = raw[i * 3 + 1]; wt[p] = raw[i * 3 + 2]; }
     free(raw); free(fill);
-    int64_t *dist = malloc((size_t)n * 8); int64_t *tl = malloc((size_t)n * 8);
+    int64_t *dist = ck(malloc((size_t)n * 8)); int64_t *tl = ck(malloc((size_t)n * 8));
     const int64_t INF = INT64_MAX / 4;
     for (uint32_t i = 0; i < n; i++) { dist[i] = INF; tl[i] = INF; }
     uint32_t nq; rd(&nq, 4, q);
-    uint32_t *touched = malloc((size_t)n * 4);
+    uint32_t *touched = ck(malloc((size_t)n * 4));
     for (uint32_t qi = 0; qi < nq; qi++) {
         uint32_t ns; rd(&ns, 4, q);
-        uint32_t *sn = malloc(ns * 4); int32_t *sl = malloc(ns * 4);
+        uint32_t *sn = ck(malloc(ns * 4)); int32_t *sl = ck(malloc(ns * 4));
         for (uint32_t i = 0; i < ns; i++) { rd(&sn[i], 4, q); rd(&sl[i], 4, q); }
         uint32_t nt; rd(&nt, 4, q);
-        uint32_t *tn = malloc(nt * 4); int32_t *tlab = malloc(nt * 4);
+        uint32_t *tn = ck(malloc(nt * 4)); int32_t *tlab = ck(malloc(nt * 4));
         int64_t mint = INF;
         for (uint32_t i = 0; i < nt; i++) { rd(&tn[i], 4, q); rd(&tlab[i], 4, q); if (tl[tn[i]] > tlab[i]) tl[tn[i]] = tlab[i]; if (tlab[i] < mint) mint = tlab[i]; }
         size_t ntouch = 0; hn = 0;

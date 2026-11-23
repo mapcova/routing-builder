@@ -70,7 +70,7 @@ final class RouterTest extends TestCase
         $tiling = $this->tiling([6.106, 6.114], ['id' => 'top', 'children' => [['id' => 'l1', 'children' => ['t0', 't1']], 't2']]);
         $this->buildAll($tiling, ['t0', 't1', 't2']);
         $l1 = new LinkFile($this->dir . '/l1.mco');
-        self::assertGreaterThan(0, $l1->border()['keys'] === [] ? 0 : 1, 'l1 has an outer border');
+        self::assertNotEmpty($l1->border()['keys'], 'l1 has an outer border');
         self::assertFalse($l1->remainder);
         self::assertTrue((new LinkFile($this->dir . '/top.mco'))->remainder);
         self::assertGreaterThan(250, $this->compare($tiling));
