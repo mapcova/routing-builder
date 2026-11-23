@@ -28,6 +28,10 @@ if (count($argv) < 3) {
 $ts = TileSet::load($argv[1]);
 $dir = $argv[2];
 $limit = (float) ($argv[3] ?? 256) * 1048576;
+if ($limit <= 0) {
+    fwrite(STDERR, "the memory limit must be a positive number of MB\n");
+    exit(2);
+}
 
 /** @return array{launches:int,longest:float,total:float,peak:float} */
 function slices(string $file): array
