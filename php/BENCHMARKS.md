@@ -77,6 +77,32 @@ compared byte for byte with an uninterrupted build (fixed build time). Fresh wor
 `tests/BuilderTest.php` does the same in process: a build resumed after every phase and every few contracted nodes, and a work
 directory with garbage appended to a file since the last checkpoint, are byte-identical to the uninterrupted build.
 
+## After the hardening of the resume (`fix/php-builder-resume`)
+
+The same Luxembourg extract and machine, `memory_limit=256M`, the code with the work-directory key, the lock, checked writes,
+the streamed checkpoint and the preflight. **Nothing moved**: the car file built by the hardened builder (no `--dump-arcs`) is
+byte for byte the one of the merged builder, with the same peaks (graph 103 MB, contraction 74 MB, finish 70 MB, slice peak 103 MB
+= 40 % of the limit; the earlier table says 105 MB, the run-to-run spread of the allocator).
+
+| Profile | Arc lists vs Rust | Sections vs Rust | Routes: weight identical | Duration within 1 s | Slice (one launch) |
+|---|---|---|---|---|---|
+| car | identical (268,187 arcs) | identical (89,073 segments, 26 shadow pairs) | 1000 / 1000 | 999 / 1000 (pair 79, as above) | 54 s on the loaded machine, peak 105 MB (41 %) |
+| bike | identical (470,454) | identical (237,479 segments) | 1000 / 1000 | 1000 / 1000 | 38 s, peak 152 MB (59 %) |
+| foot | identical (467,685) | identical (234,611 segments) | 1000 / 1000 | 1000 / 1000 | 56 s, peak 152 MB (59 %) |
+
+(With `--dump-arcs` the contraction phase of the same process peaks at 86 MB instead of 74 MB: the sorted arc list of the dump leaves the
+allocator with chunks it does not give back; the slice peak is unchanged.) The 40 % early-checkpoint rule did not fire on any of these
+builds: the contraction of bike and foot starts above 40 % of 256 MB (102 MB) but does not grow.
+
+Kill and resume, byte for byte against an uninterrupted build, car:
+
+| Series | Result |
+|---|---|
+| slice 240 s, 8 kills at random moments (delays 3-97 % of the build) | 8 identical (4 killed in `contract`, 4 had just finished) |
+| slices of 5 s, 4 trials, delays up to 49 s: the launches end by themselves | 4 identical (9 to 10 launches each: resume from launch to launch) |
+| slices of 5 s, 6 kills inside a slice (delays 0.5-4.3 s) | 6 identical (killed in `ways`/`nodes`/`graph`, 8 to 16 launches each) |
+| `tools/synthetic-check.sh`, small town, car and bike, 6 kills each, plus car with slices of 50 ms | all identical (about 6 s in all) |
+
 ## Not measured
 
 Extrapolation to tiles of 0.25 to 0.9 M nodes, and the timings on the production host (OPcache off there as here; the design

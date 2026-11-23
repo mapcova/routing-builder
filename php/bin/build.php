@@ -4,6 +4,7 @@
 declare(strict_types=1);
 
 use MapCova\GraphBuilder\Build\Builder;
+use MapCova\GraphBuilder\Build\BuilderBusy;
 use MapCova\GraphBuilder\Build\Options;
 
 require __DIR__ . '/../vendor/autoload.php';
@@ -11,7 +12,8 @@ require __DIR__ . '/../vendor/autoload.php';
 /**
  * Builds a `.mcr` routing graph from an OSM extract, in resumable slices: each launch works for at most `--slice`
  * seconds, saves its state in the work directory and exits with 10; launch it again to go on. Exit 0: the file is
- * written. Exit 1: an error.
+ * written. Exit 1: an error. Exit 2: bad arguments. Exit 11: another launch is running in the same work directory
+ * (nothing was done: try again later).
  */
 function usage(): never
 {
@@ -69,11 +71,14 @@ try {
     $builder = new Builder($options, static function (string $m): void {
         fprintf(STDERR, "[%s] %s\n", date('H:i:s'), $m);
     });
-    if ($builder->isDone() && is_file($out)) {
+    if ($builder->isDone()) {
         fwrite(STDERR, "already built: $out\n");
         exit(0);
     }
     $r = $builder->runSlice();
+} catch (BuilderBusy $e) {
+    fwrite(STDERR, 'build.php: ' . $e->getMessage() . "\n");
+    exit(11);
 } catch (Throwable $e) {
     fwrite(STDERR, 'build.php: ' . $e->getMessage() . "\n");
     exit(1);

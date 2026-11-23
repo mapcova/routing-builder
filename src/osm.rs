@@ -165,7 +165,7 @@ pub fn read(path: &str, profile: Profile, log: &dyn Fn(&str)) -> Result<OsmData,
     let (mut ways, mut restrictions) = pass1(path, profile)?;
     // the parallel read returns blocks in any order: sort, so that a build is reproducible (segment and node numbers
     // do not depend on the thread schedule) and the PHP builder, which reads in file order, numbers the same way
-    ways.sort_unstable_by_key(|w| w.id);
+    ways.sort_by_key(|w| w.id);
     restrictions.sort_unstable_by(|a, b| {
         (a.from, a.to, a.via_node, &a.via_ways, a.only).cmp(&(b.from, b.to, b.via_node, &b.via_ways, b.only))
     });

@@ -185,27 +185,30 @@ final class Net
     private static function readWays(string $path): \Generator
     {
         $f = self::open($path);
-        $i = 0;
-        while (($h = fread($f, WaysPass::WAY_HEADER)) !== false && \strlen($h) === WaysPass::WAY_HEADER) {
-            $u = Bin::ints('Pid/Vn/x16/Cflags', $h);
-            $n = $u['n'];
-            $flags = $u['flags'];
-            yield $i++ => [
-                $u['id'],
-                $n > 0 ? Bin::list('P' . $n, (string) fread($f, $n * 8)) : [],
-                new Way(
-                    Bin::f32($h, 12),
-                    Bin::f32($h, 16),
-                    Bin::f32($h, 20),
-                    Bin::f32($h, 24),
-                    ($flags & 1) !== 0,
-                    ($flags & 8) !== 0 ? Bin::f32($h, 29) : null,
-                    ($flags & 2) !== 0,
-                    ($flags & 4) !== 0,
-                ),
-            ];
+        try {
+            $i = 0;
+            while (($h = fread($f, WaysPass::WAY_HEADER)) !== false && \strlen($h) === WaysPass::WAY_HEADER) {
+                $u = Bin::ints('Pid/Vn/x16/Cflags', $h);
+                $n = $u['n'];
+                $flags = $u['flags'];
+                yield $i++ => [
+                    $u['id'],
+                    $n > 0 ? Bin::list('P' . $n, (string) fread($f, $n * 8)) : [],
+                    new Way(
+                        Bin::f32($h, 12),
+                        Bin::f32($h, 16),
+                        Bin::f32($h, 20),
+                        Bin::f32($h, 24),
+                        ($flags & 1) !== 0,
+                        ($flags & 8) !== 0 ? Bin::f32($h, 29) : null,
+                        ($flags & 2) !== 0,
+                        ($flags & 4) !== 0,
+                    ),
+                ];
+            }
+        } finally {
+            fclose($f);
         }
-        fclose($f);
     }
 
     /**

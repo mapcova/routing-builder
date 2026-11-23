@@ -180,4 +180,64 @@ final class PbfPipelineTest extends TestCase
         self::assertSame(0x100000000 - 33500001, $u['lat']);
         self::assertSame(1235, $u['lon']);
     }
+
+    public function testWaysThatAreNotSortedByIdFailAtOnce(): void
+    {
+        $w = new PbfWriter();
+        $w->node(1, 49.6, 6.1)->node(2, 49.601, 6.1)
+            ->way(5, [1, 2], ['highway' => 'residential'])
+            ->way(3, [1, 2], ['highway' => 'residential']);
+        $w->write($this->dir . '/unsorted.osm.pbf');
+        $pass = new WaysPass(Profile::parse('car') ?? throw new \LogicException());
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('not sorted by id (way 3 after 5)');
+        foreach (PbfReader::blobs($this->dir . '/unsorted.osm.pbf') as $b) {
+            if ($b['type'] === 'OSMData') {
+                $pass->process(Block::decode($b['data']));
+            }
+        }
+    }
+
+    public function testTheLastWayIdSurvivesALaunchBoundary(): void
+    {
+        $w = new PbfWriter();
+        $w->node(1, 49.6, 6.1)->node(2, 49.601, 6.1)->way(5, [1, 2], ['highway' => 'residential']);
+        $w->write($this->dir . '/one.osm.pbf');
+        $this->expectException(\RuntimeException::class);
+        foreach (PbfReader::blobs($this->dir . '/one.osm.pbf') as $b) {
+            if ($b['type'] === 'OSMData') {
+                (new WaysPass(Profile::parse('car') ?? throw new \LogicException(), 9))->process(Block::decode($b['data']));
+            }
+        }
+    }
+
+    public function testAnAbsurdBlobHeaderIsRefusedBeforeItIsRead(): void
+    {
+        file_put_contents($this->dir . '/bad.pbf', pack('N', 70000) . str_repeat("\0", 100));
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('a blob header of 70000 bytes');
+        foreach (PbfReader::blobs($this->dir . '/bad.pbf') as $_) {
+        }
+    }
+
+    public function testAnAbsurdBlobSizeIsRefused(): void
+    {
+        // header: type "OSMData" (field 1), datasize (field 3) = 64 MiB
+        $h = "\x0a\x07OSMData" . "\x18" . "\x80\x80\x80\x20";
+        file_put_contents($this->dir . '/bad.pbf', pack('N', \strlen($h)) . $h);
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('over the limit');
+        foreach (PbfReader::blobs($this->dir . '/bad.pbf') as $_) {
+        }
+    }
+
+    public function testATruncatedBlobIsAnError(): void
+    {
+        $h = "\x0a\x07OSMData" . "\x18\x64";
+        file_put_contents($this->dir . '/bad.pbf', pack('N', \strlen($h)) . $h . 'short');
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('truncated');
+        foreach (PbfReader::blobs($this->dir . '/bad.pbf') as $_) {
+        }
+    }
 }

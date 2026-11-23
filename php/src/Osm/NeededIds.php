@@ -6,6 +6,7 @@ namespace MapCova\GraphBuilder\Osm;
 
 use MapCova\GraphBuilder\Support\Bin;
 use MapCova\GraphBuilder\Support\IntMinHeap;
+use MapCova\GraphBuilder\Support\Io;
 use RuntimeException;
 
 /**
@@ -74,12 +75,12 @@ final class NeededIds
                 $prev = $id;
             }
             if (\strlen($buf) >= 1 << 16) {
-                fwrite($f, $buf);
+                Io::write($f, $buf, $path);
                 $buf = '';
             }
         }
-        fwrite($f, $buf);
-        fclose($f);
+        Io::write($f, $buf, $path);
+        Io::close($f, $path);
 
         return $path;
     }
@@ -121,7 +122,7 @@ final class NeededIds
                 $prev = $id;
                 $count++;
                 if (\strlen($buf) >= 1 << 16) {
-                    fwrite($out, $buf);
+                    Io::write($out, $buf, $outPath);
                     $buf = '';
                 }
             }
@@ -134,12 +135,14 @@ final class NeededIds
             }
             $heap->insert(($bufs[$i][$pos[$i]] << 8) | $i);
         }
-        fwrite($out, $buf);
-        fclose($out);
+        Io::write($out, $buf, $outPath);
+        Io::close($out, $outPath);
         foreach ($files as $f) {
             fclose($f);
         }
-        rename($outPath . '.part', $outPath);
+        if (!rename($outPath . '.part', $outPath)) {
+            throw new RuntimeException("cannot rename {$outPath}.part");
+        }
 
         return $count;
     }

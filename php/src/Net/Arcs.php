@@ -6,6 +6,7 @@ namespace MapCova\GraphBuilder\Net;
 
 use Generator;
 use MapCova\GraphBuilder\Support\Bin;
+use RuntimeException;
 
 /**
  * The arcs of a graph before contraction, kept as one binary string (six u32 per arc: source, destination, weight and
@@ -26,6 +27,9 @@ final class Arcs
 
     public function add(int $src, int $dst, int $w, int $t, int $d, int $sd): void
     {
+        if ($w < 0 || $w > 0xFFFFFFFF || $t < 0 || $t > 0xFFFFFFFF || $d < 0 || $d > 0xFFFFFFFF) {
+            throw new RuntimeException("an arc is too long to be stored in 32 bits (weight $w, duration $t, distance $d): cut the zone smaller");
+        }
         $this->buf .= pack('V6', $src, $dst, $w, $t, $d, $sd);
         ++$this->n;
     }
