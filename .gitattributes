@@ -1,0 +1,4 @@
+# the tiling files are written by php/tiles/derive.py from OpenStreetMap boundaries
+php/tiles/*.poly linguist-generated=true
+php/tiles/tiles.json linguist-generated=true
+php/tiles/tiles-flat.json linguist-generated=true

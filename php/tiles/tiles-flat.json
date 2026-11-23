@@ -1,0 +1,41 @@
+{
+  "name": "be-lu-flat",
+  "cell": 2000,
+  "tiles": {
+    "be-antwerpen": "be-antwerpen.poly",
+    "be-kempen-maasland": "be-kempen-maasland.poly",
+    "be-hasselt-leuven": "be-hasselt-leuven.poly",
+    "be-gent-eeklo": "be-gent-eeklo.poly",
+    "be-aalst-waasland": "be-aalst-waasland.poly",
+    "be-brugge-kust": "be-brugge-kust.poly",
+    "be-kortrijk-ieper": "be-kortrijk-ieper.poly",
+    "be-bruxelles-halle": "be-bruxelles-halle.poly",
+    "be-nivelles-charleroi": "be-nivelles-charleroi.poly",
+    "be-hainaut-ouest": "be-hainaut-ouest.poly",
+    "be-liege": "be-liege.poly",
+    "be-verviers-huy": "be-verviers-huy.poly",
+    "be-namur-dinant": "be-namur-dinant.poly",
+    "be-luxembourg": "be-luxembourg.poly",
+    "lu": "lu.poly"
+  },
+  "tree": {
+    "id": "flat-be-lu",
+    "children": [
+      "be-antwerpen",
+      "be-kempen-maasland",
+      "be-hasselt-leuven",
+      "be-gent-eeklo",
+      "be-aalst-waasland",
+      "be-brugge-kust",
+      "be-kortrijk-ieper",
+      "be-bruxelles-halle",
+      "be-nivelles-charleroi",
+      "be-hainaut-ouest",
+      "be-liege",
+      "be-verviers-huy",
+      "be-namur-dinant",
+      "be-luxembourg",
+      "lu"
+    ]
+  }
+}
