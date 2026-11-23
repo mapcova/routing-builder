@@ -568,8 +568,10 @@ final class Contractor
             throw new RuntimeException("$path is not a contraction state of this version: remove the work directory");
         }
         $kl = Bin::u32($r->take(4));
-        $saved = $kl > 1024 ? '' : $r->take($kl);
-        if ($saved !== $key) {
+        if ($kl > 1024) {
+            throw new RuntimeException("$path has a build key of $kl bytes, it is corrupted: remove the work directory");
+        }
+        if ($r->take($kl) !== $key) {
             throw new RuntimeException("$path belongs to another build: remove the work directory");
         }
         [$n, $rank, $initNext, $shortcuts, $upSize, $idxSize, $ordSize] = Bin::list('P7', $r->take(56));
