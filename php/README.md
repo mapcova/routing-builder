@@ -7,7 +7,7 @@ launch works for at most `--slice` seconds, saves a small checkpoint in a work d
 carries on from there. The last one writes the file, atomically.
 
 This is the prototype of the design study "build the routing graphs in PHP on the host": the Luxembourg extract, the
-four profiles, checked against the Rust builder arc by arc. The tile and link levels come later (see the end).
+four profiles, checked against the Rust builder arc by arc. The tiles and the links come in the [last section](#tiles-links-and-the-multi-level-reader).
 
 | What | Where |
 |---|---|
@@ -15,7 +15,7 @@ four profiles, checked against the Rust builder arc by arc. The tile and link le
 | Profiles `car`, `car-notoll`, `bike`, `foot`: line-by-line ports of `src/profile/*.rs`, `f32` arithmetic imitated | `src/Profile`, `src/Support/F32.php` |
 | Network, edge-based and node-based graphs, turn restrictions (also through ways), strongly connected component | `src/Net` |
 | Contraction Hierarchies, resumable, carrying weight, duration and distance | `src/Ch/Contractor.php` |
-| `.mcr` v1 writer, phases and checkpoints | `src/Mcr`, `src/Build` |
+| `.mcr` writer (v1, and the two sections of a tile), phases and checkpoints | `src/Mcr`, `src/Build` |
 | Command line | `bin/build.php` |
 | Comparison with the Rust builder, kill test | `tools/` |
 
@@ -159,9 +159,58 @@ node and via-way restrictions. The tests check that the hierarchy of every profi
 arcs, and that a build resumed after every phase and every few contracted nodes, or after garbage appended to a file
 since the last checkpoint, is byte for byte the uninterrupted one.
 
+## Tiles, links, and the multi-level reader
+
+For a country that does not fit one file (the memory of the host sets the size of a tile, see below) the same builder cuts
+the network into **tiles** and ties them with **links**. The format is in [FORMAT.md](../FORMAT.md#tiles-and-links-format-level-2);
+the measures on Belgium and Luxembourg are in [BENCHMARKS.md](BENCHMARKS.md#tiles-belu).
+
+| What | Where |
+|---|---|
+| The tiling: tile polygons, the tree of links, who owns a point | `src/Tiles`, `tiles/tiles.json`, `tiles/*.poly` |
+| A tile: the extract of the tile plus a margin, cut down to the tile; border vertices frozen, core saved when K interior vertices are left (`--export-interior`, 1000), sections `border` (the exported vertices) and `core` | `--tiles` of `bin/build.php`, `src/Build/TileCut.php` |
+| A link over its children (any number of levels), contracted inside, the top partly | `bin/build-link.php`, `src/Link` |
+| Transit files (polylines of the ways between the exported vertices of a tile) | `bin/transit.php`, `src/Link/TransitBuilder.php` |
+| The reference reader: up through the levels, across, down; Dijkstra on the remainder of the top; geometry | `src/Query` |
+| Cutting the extracts of the tiles, acceptance against the whole graph and against the merged PHP graph (plain Dijkstra in C), reports | `tools/tile-extract.sh`, `tools/tiles-acceptance.php`, `tools/merged-export.php`, `tools/merged-dijkstra.c`, `tools/tiles-report.php` |
+
+```sh
+tools/tile-extract.sh tiles/tiles.json be-lu.osm.pbf extracts 3000      # one extract per tile, 3 km of margin (osmium)
+php bin/build.php --tile lu --profile car --input extracts/lu.osm.pbf --out out/lu.mcr --tiles tiles/tiles.json --memory 256M
+php bin/transit.php out/lu.mcr out/lu.mct
+php bin/build-link.php --tiles tiles/tiles.json --link l1-flandre --dir out --memory 256M   # children's files are <id>.mcr / <id>.mco
+                                                                                        # --export-interior 1000 (K_L), --remainder 300 (R, the top)
+```
+
+A tile is built exactly like a zone (same phases, checkpoints, slices, kill-and-resume), from the extract of its polygon plus a
+margin; the roads of the margin that another tile owns are dropped after the network is built, so the turn costs and
+restrictions next to the border are those of the whole network. Two options of the build key matter: `--tiles` (the tiling and its
+polygons) and the extract. A link is built the same way (`bin/build-link.php`: phases `load`, `contract`, `finish`, state in its
+work directory, exit codes as `build.php`), with the same contractor; its key includes the content of every child file. A cross arc
+that the two tiles do not both have, alike, stops the build of the link with a message naming it.
+
+**Why the export holds interior vertices.** The shortest ways between the border vertices of a tile are nearly a clique (every
+entry to 40 to 70 % of the exits), 20 to 100 arcs a vertex, and the link above that contracts a clique of cliques is far too
+slow. The tile freezes its border and contracts its interior until K = 1000 interior vertices are left (the main roads), takes
+the snapshot then (about 5 arcs a vertex), and goes on contracting those K and the border for its own hierarchy. A link does
+the same over the union of the exports of its children (K_L = 1000), and the top leaves R = 300 vertices to a Dijkstra. The whole
+is one contraction hierarchy: tile interiors, then link interiors, then the rest, exact like a single graph.
+
+**What a query does** (`Query\Router`): snap each end in its tile; in each file a multi-source upward search over the hierarchy
+(a tile stops at its exported vertices, a link at the ones it exports); the labels at those exits are the sources of the level above;
+at the lowest link holding both tiles the two searches meet (the top link finishes with a Dijkstra over its remainder); the route
+goes on one level up while the cheapest possible way out of the group (cheapest label at the exits of each side) could beat the
+route found (and each search of a level stops at the best known total minus the smallest label of the other side), so a route that leaves its group and comes back (Martelange to Arlon through Luxembourg) is found exactly. The
+geometry is unpacked down through the links and child cores to the polylines of the transit files, and from the tiles of the two
+ends by their own hierarchy. Two points on one road, the second behind the first, make a loop around a block that a hierarchy
+finds only when the loop has a node above both ends: the whole graph and the tiles can differ there (the tests skip those pairs;
+the acceptance counts them).
+
+**Memory sets the size of a tile.** The `graph` phase holds the kept nodes of the extract, margin included (about 330 bytes
+each, [above](#memory)), so a tile of more than about 600,000 kept nodes (300,000 nodes of the car graph, margin
+included) is refused at 256 MB with the message the builder gives for any zone; cut it in two (`tiles/tiles.json`).
+
 ## Not in this version
 
-The design study continues from here: tiles (an administrative cut of a country, one `.mcr` each), the `border` and
-`core` sections of format v2, the links between tiles, the scheduler in `mapcova-updates`. This library builds one
-`.mcr` v1 per run; for a zone that fits the memory of the host (about 210 bytes per node of the graph at the peak of the
-contraction, plus the network) it is already the whole job.
+Bike and foot tiles (the cross arcs are those of the edge-based graph; a node-based tile shares junctions instead), the
+scheduler in `mapcova-updates`, the `plus-local-routing` port of the reader.
