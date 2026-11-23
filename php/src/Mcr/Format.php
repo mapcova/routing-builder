@@ -12,6 +12,8 @@ final class Format
     public const VERSION = 1;
     public const HEADER = 4096;
     public const SECTIONS = ['nodes', 'up_fwd', 'up_bwd', 'segments', 'geometry', 'grid_dir', 'grid_lists', 'shadows', 'meta'];
+    /** The sections a tile adds (format level 2): entries 9 and 10 of the section table, which a version 1 reader never reads. */
+    public const TILE_SECTIONS = ['border', 'core'];
     public const SEG_BYTES = 40;
     public const LICENSE_OFFSET = 512;
     public const LICENSE_LEN = 1024;
@@ -84,8 +86,8 @@ final class Format
             $head = substr_replace($head, pack('PP', $off, $len), 128 + $i * 16, 16);
             $off += intdiv($len + 4095, 4096) * 4096;
         }
-        if (\count($lengths) !== 9) {
-            throw new RuntimeException('a .mcr file has nine sections');
+        if (\count($lengths) !== 9 && \count($lengths) !== 11) {
+            throw new RuntimeException('a .mcr file has nine sections, or eleven for a tile');
         }
 
         return [$head, $table];

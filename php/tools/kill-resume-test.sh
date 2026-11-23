@@ -7,6 +7,8 @@
 # Each trial: a fresh work directory, a build started in the background, killed (SIGKILL) after a random delay between
 # `from` and `to` (fractions, 3 % and 97 % by default) of the time an uninterrupted build takes, then relaunched until it reports the file written. The build
 # time of the file is fixed (`--built-at`), so identical means identical.
+#
+# For a tile: KILL_TEST_TILE=lu KILL_TEST_EXTRA='--tiles tiles/tiles.json --junctions junctions.bin' tools/kill-resume-test.sh lu.osm.pbf car 10
 set -u
 in=${1:?extract}
 profile=${2:?profile}
@@ -20,8 +22,8 @@ here=$(cd "$(dirname "$0")/.." && pwd)
 work=${KILL_TEST_DIR:-$(mktemp -d "${TMPDIR:-/tmp}/mcr-kill.XXXXXX")}
 mkdir -p "$work"
 args() { # out
-  echo -d memory_limit="$memory" "$here/bin/build.php" --tile test --profile "$profile" --input "$in" --out "$1" \
-    --slice "$slice" --built-at 1700000000 --work "$1.work"
+  echo -d memory_limit="$memory" "$here/bin/build.php" --tile "${KILL_TEST_TILE:-test}" --profile "$profile" --input "$in" --out "$1" \
+    --slice "$slice" --built-at 1700000000 --work "$1.work" ${KILL_TEST_EXTRA:-}
 }
 build() { # out: one launch, in the foreground
   # shellcheck disable=SC2046
