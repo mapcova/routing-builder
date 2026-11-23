@@ -82,7 +82,7 @@ final class PbfReader
         }
         $s = '';
         while (\strlen($s) < $n) {
-            $part = fread($f, $n - \strlen($s));
+            $part = fread($f, max(1, $n - \strlen($s)));
             if ($part === false || $part === '') {
                 throw new RuntimeException('truncated PBF file');
             }
