@@ -61,9 +61,13 @@ final class Io
      */
     public static function copy($in, $out, int $expected, string $what): void
     {
-        $n = @stream_copy_to_stream($in, $out);
+        $n = $expected > 0 ? @stream_copy_to_stream($in, $out, $expected) : 0;
         if ($n !== $expected) {
             throw new RuntimeException("cannot copy $what: " . ($n === false ? 'failed' : "$n of $expected bytes") . ' (disk full?)');
+        }
+        $extra = fread($in, 1);
+        if ($extra !== false && $extra !== '') {
+            throw new RuntimeException("cannot copy $what: it is longer than $expected bytes");
         }
     }
 

@@ -126,6 +126,7 @@ final class Workdir
      */
     public function clean(array $keep = []): void
     {
+        // `*` does not match dotfiles: `.lock` stays, and so does the lock this launch holds on it
         foreach (glob($this->dir . '/*') ?: [] as $f) {
             if (is_file($f) && !\in_array(basename($f), $keep, true)) {
                 unlink($f);

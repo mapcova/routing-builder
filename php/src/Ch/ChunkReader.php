@@ -15,6 +15,8 @@ final class ChunkReader
     private $f;
     private string $buf = '';
     private int $pos = 0;
+    private int $size;
+    private int $taken = 0;
 
     public function __construct(private readonly string $path)
     {
@@ -23,6 +25,8 @@ final class ChunkReader
             throw new RuntimeException("cannot open $path");
         }
         $this->f = $f;
+        $st = fstat($f);
+        $this->size = $st === false ? PHP_INT_MAX : $st['size'];
     }
 
     public function __destruct()
@@ -38,9 +42,16 @@ final class ChunkReader
         $this->buf = '';
     }
 
-    /** Exactly `$n` bytes, or an exception when the file ends first. */
+    /**
+     * Exactly `$n` bytes, or an exception when the file ends first. A length longer than what is left of the file
+     * (a damaged length field) is refused before anything is read or allocated.
+     */
     public function take(int $n): string
     {
+        if ($n < 0 || $n > $this->size - $this->taken) {
+            throw new RuntimeException("{$this->path} is truncated or damaged: $n bytes asked, " . max(0, $this->size - $this->taken) . ' left');
+        }
+        $this->taken += $n;
         while (\strlen($this->buf) - $this->pos < $n) {
             $more = fread($this->f, max(self::CHUNK, $n));
             if ($more === false || $more === '') {

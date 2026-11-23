@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace MapCova\GraphBuilder\Tests;
 
+use MapCova\GraphBuilder\Build\Workdir;
+use MapCova\GraphBuilder\Ch\ChunkReader;
 use MapCova\GraphBuilder\Support\Bin;
 use MapCova\GraphBuilder\Support\Io;
 use MapCova\GraphBuilder\Tests\Support\LimitedStream;
@@ -70,6 +72,68 @@ final class IoTest extends TestCase
         Io::copy($in, $out, 3, 'section');
         rewind($out);
         self::assertSame('abc', stream_get_contents($out));
+    }
+
+    public function testACopyNeverWritesMoreThanExpectedAndRefusesALongerSource(): void
+    {
+        $in = fopen('php://memory', 'w+b');
+        $out = fopen('php://memory', 'w+b');
+        self::assertIsResource($in);
+        self::assertIsResource($out);
+        fwrite($in, 'abcdef');
+        rewind($in);
+        try {
+            Io::copy($in, $out, 3, 'section');
+            self::fail('a longer source must be refused');
+        } catch (RuntimeException $e) {
+            self::assertStringContainsString('longer than 3 bytes', $e->getMessage());
+        }
+        rewind($out);
+        self::assertSame('abc', stream_get_contents($out));
+    }
+
+    public function testAChunkReaderRefusesALengthLongerThanTheFileBeforeAllocating(): void
+    {
+        $path = tempnam(sys_get_temp_dir(), 'chunk');
+        self::assertIsString($path);
+        file_put_contents($path, 'abcd');
+        try {
+            $r = new ChunkReader($path);
+            self::assertSame('ab', $r->take(2));
+            $before = memory_get_usage();
+            try {
+                $r->take(0x7FFFFFFF);
+                self::fail('a damaged length must be refused');
+            } catch (RuntimeException $e) {
+                self::assertStringContainsString('2 left', $e->getMessage());
+            }
+            self::assertLessThan(1 << 20, memory_get_usage() - $before);
+            self::assertSame('cd', $r->take(2));
+            self::assertTrue($r->atEnd());
+            $r->close();
+        } finally {
+            unlink($path);
+        }
+    }
+
+    public function testCleaningALockedWorkdirKeepsTheLockFile(): void
+    {
+        $dir = sys_get_temp_dir() . '/wd-' . bin2hex(random_bytes(4));
+        $w = new Workdir($dir);
+        $w->lock();
+        try {
+            file_put_contents($dir . '/phase.bin', 'x');
+            $w->clean();
+            self::assertFileExists($dir . '/.lock');
+            self::assertFileDoesNotExist($dir . '/phase.bin');
+            $other = new Workdir($dir);
+            $this->expectException(\MapCova\GraphBuilder\Build\BuilderBusy::class);
+            $other->lock();
+        } finally {
+            $w->unlock();
+            @unlink($dir . '/.lock');
+            @rmdir($dir);
+        }
     }
 
     public function testAnAtomicWriteLeavesNoTemporaryFile(): void
