@@ -180,3 +180,34 @@ duration, distance) and the cross arcs (kind, keys, weight, duration, distance),
 `meta.tile` repeats it as hex (`id`, `index`, `border` vertices, `exported` vertices, `cross_arcs`, `core_arcs`, `core_hash`).
 A rebuilt tile whose exported interior vertices (chosen by the order of the contraction) or the ways between them changed has a new
 hash even if its border did not: a local edit can reach the links above more often than with a border-only export.
+
+### Links: `.mco`
+
+Header of 4096 bytes as a tile's (magic `MCO\0`, version 1, profile, graph type 1, vertices, forward and backward upward arcs,
+at offset 36 the number of uncontracted vertices, at 96 the link id, the licence notice at 512), section table at 128 with eight
+entries: 0 `nodes`, 1 `up_fwd`, 2 `up_bwd` (as in a tile), 3 `vertices`, 4 `orig`, 5 `border`, 6 `core`, 7 `meta`.
+
+The vertices of a link are the vertices its children export, sorted by key (`vertices`: 28-byte key, `u32` node id).
+Its arcs are the core arcs of its children and the cross arcs between two of its children; a cross arc must be in the files of
+both its tiles, alike: the build stops otherwise. A vertex with a cross arc to a tile outside the link is on the **outer border**:
+it is frozen, and left uncontracted with the K_L most important interior vertices (1000 by default); they are exported
+(`border`, `core`, as for a tile, without cross arcs; flags 1 outer border, 4 interior) to the link above. A link with no outer
+border (the top) is contracted except for a **remainder** of R vertices (300 by default): they are left uncontracted (flag 4), and a
+query finishes by a Dijkstra over their `core` arcs (`core` header flag, third `u32`: 1). The uncontracted vertices have the lowest
+node ids, in key order, so the core index of a vertex is its node id.
+
+`orig` (12 bytes per original arc): `u32 kind, u32 source vertex, u32 target vertex` (indices in `vertices`): `kind` is the
+index of a child (the arc is a core arc of that child between those two vertices), or `0x80000000 | tile index` (a cross arc of
+that tile). The middle of an original arc in `up_fwd`, `up_bwd` and `core` is `0x80000000 | index in orig`, so that a path
+unpacks through the links, the child cores and the tiles down to roads. `meta`: `link`, `children` and `tiles` with the
+`core_hash` of each (what the link was built from), `outer_border`, `exported`, `remainder`, `core_hash`, counts.
+
+### Transit files: `.mct`
+
+For every core arc of a tile (exported vertex to exported vertex) and every cross arc that leaves it, the polyline of the roads,
+simplified (0.5 m), so that a route through a tile that is not installed still has its geometry. Header of 64 bytes (magic
+`MCT\0`, `u32` version 1, vertices, core arcs, cross arcs); the keys of the exported vertices (28 bytes each); `u32` first-arc
+indices (vertices + 1) and `u32` targets of the core arcs (same order as in `core`); the cross arcs of kind 0 (`u32 vertex
+index, 28-byte key of the other end`); `u32` offsets of the polylines (core arcs, then cross arcs, plus one); the polylines,
+coded like `geometry`. A core arc covers the roads from its first vertex up to, not including, its last one (that road belongs
+to the next arc, which starts with it), a cross arc the road of its source.
