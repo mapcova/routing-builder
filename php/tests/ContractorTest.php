@@ -233,6 +233,21 @@ final class ContractorTest extends TestCase
         }
     }
 
+    public function testFreezeFlagsOfTheWrongLengthOrANegativeRemainderAreRefused(): void
+    {
+        file_put_contents($this->dir . '/two.bin', pack('V6', 0, 1, 5, 5, 10, 0xFFFFFFFF));
+        $c = Contractor::fromArcs(2, $this->dir . '/two.bin', true, $this->dir . '/v.up', $this->dir . '/v.idx', $this->dir . '/v.ord');
+        $c->setFreeze('', true, 5); // no frozen node, a remainder larger than the graph: allowed (everything stays)
+        try {
+            $c->setFreeze("\1", true, 0);
+            self::fail('frozen flags of the wrong length must be refused');
+        } catch (\InvalidArgumentException $e) {
+            self::assertStringContainsString('1 bytes for 2 nodes', $e->getMessage());
+        }
+        $this->expectException(\InvalidArgumentException::class);
+        $c->setFreeze("\1\0", true, -1);
+    }
+
     public function testTheSnapshotAtKInteriorNodesIsTakenWhenReleasingToo(): void
     {
         $arcs = $this->graph(80, 200, 11);

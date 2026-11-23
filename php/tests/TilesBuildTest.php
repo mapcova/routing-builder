@@ -127,6 +127,14 @@ final class TilesBuildTest extends TestCase
         $fine['cell'] = 1000;
         file_put_contents($tiling, json_encode($fine));
         self::assertSame([27, 42], TileSet::load($tiling)->marginCells(0, 3000.0));
+        $fine['cell'] = 0;
+        file_put_contents($tiling, json_encode($fine));
+        try {
+            TileSet::load($tiling);
+            self::fail('a cell size of 0 must be refused');
+        } catch (\RuntimeException $e) {
+            self::assertStringContainsString('positive', $e->getMessage());
+        }
         $rings = $ts->margin(0, 3, 3);
         self::assertNotEmpty($rings);
         // the extract of a tile holds the roads it owns outside every polygon too (the margin grows from those cells as well)

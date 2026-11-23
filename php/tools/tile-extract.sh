@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/usr/bin/env bash
 # Cuts the extract of each tile (the tile and a margin) out of one merged, sorted extract with osmium:
 #   tools/tile-extract.sh <tiles.json> <merged.osm.pbf> <out dir> [margin metres, default 3000]
 # Writes <out dir>/<tile>.osm.pbf; the tile is then built with
@@ -8,7 +8,7 @@
 # 2. the region of the tile grown by the margin (`tile-margin.php`) is cut out with its complete ways;
 # 3. every road that touches a node of that extract is added (`getparents`, then the nodes of those roads): the junctions at
 #    the ends of the roads that leave the margin are then complete, and the turn costs there are those of the whole network.
-set -e
+set -eo pipefail
 tiles=$1
 input=$2
 out=$3

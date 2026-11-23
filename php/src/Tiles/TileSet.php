@@ -51,6 +51,9 @@ final class TileSet
             throw new RuntimeException("$jsonPath is not a tiling file");
         }
         $cell = isset($j['cell']) && \is_int($j['cell']) ? $j['cell'] : 2000;
+        if ($cell <= 0) {
+            throw new RuntimeException("$jsonPath: the cell size must be a positive number of micro-degrees, not $cell");
+        }
         $t = new self($cell);
         $rings = [];
         foreach ($j['tiles'] as $id => $poly) {

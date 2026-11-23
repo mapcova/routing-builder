@@ -178,10 +178,18 @@ final class Contractor
      * destination, weight, duration, distance, middle: five u32), and then, with `$release`, the frozen nodes and the remainder are
      * contracted too (a tile: the file stays a whole hierarchy); without it they stay uncontracted (a link).
      *
-     * @param string $frozen one byte per node, "\1" = frozen
+     * A remainder larger than the nodes that are not frozen keeps them all (the core is then the whole graph).
+     *
+     * @param string $frozen one byte per node, "\1" = frozen, or empty for none
      */
     public function setFreeze(string $frozen, bool $release, int $remainder): void
     {
+        if ($frozen !== '' && \strlen($frozen) !== $this->n) {
+            throw new \InvalidArgumentException(\sprintf('the frozen flags have %d bytes for %d nodes', \strlen($frozen), $this->n));
+        }
+        if ($remainder < 0) {
+            throw new \InvalidArgumentException("a negative remainder ($remainder)");
+        }
         $this->frozen = strpos($frozen, "\1") === false ? '' : $frozen;
         $this->release = $release;
         $this->remainder = $remainder;
